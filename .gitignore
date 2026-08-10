@@ -1,0 +1,29 @@
+# Secrets
+.env
+.env.*
+!.env.example
+config/*.env
+!config/example.env
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# ROS2
+build/
+install/
+log/
+
+# IDE / OS
+.DS_Store
+.vscode/
+.idea/
+
+# Runtime data
+runtime_snapshot/raw/
+
+# Logs
+*.log
