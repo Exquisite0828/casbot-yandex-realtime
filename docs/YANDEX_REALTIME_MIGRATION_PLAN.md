@@ -1,7 +1,7 @@
 # CASBOT → Yandex Realtime 迁移实施计划
 
 > 版本：v1.0  
-> 状态：Phase 2 已完成；Gate 2 为 PASS；Phase 3 未开始
+> 状态：Phase 3 已完成；Gate 3 为 CONDITIONAL PASS；Phase 4 未开始
 > 目标平台：Linux / ROS2 Humble / Python 3.10  
 > 核心原则：本地开发优先、最少 SSH、保持机器人外部 ROS2 契约不变、可快速回滚。
 
@@ -303,7 +303,7 @@ Metrics
 - [x] 超时（发现并移除会导致静默期客户端 1006 的可选 aiohttp heartbeat；75 秒复验通过原断点）。
 - [x] 连接、首响应、首音、总延迟（仅记录观察值，不作为性能基准）。
 
-**Gate 2（2026-08-10）：PASS。** `speech-realtime-260528` 已通过当前 endpoint 建立真实 session，并以本地 24 kHz PCM16 mono 麦克风完成俄语转写、多轮回答、增量音频返回与本地扬声器输出；未使用 fallback。一次播放中插话实际完成本地停止、truncate 与新回答。用户随后明确取消“生成中 response.cancel 必须 live 验证”的本轮要求，因此该项不阻塞 Gate。网络重连、错误凭据和系统性稳定性测试仍留在后续阶段。证据见 `docs/YANDEX_REALTIME_LOCAL_POC.md`。Phase 3 未开始。
+**Gate 2（2026-08-10）：PASS。** `speech-realtime-260528` 已通过当前 endpoint 建立真实 session，并以本地 24 kHz PCM16 mono 麦克风完成俄语转写、多轮回答、增量音频返回与本地扬声器输出；未使用 fallback。一次播放中插话实际完成本地停止、truncate 与新回答。用户随后明确取消“生成中 `response.cancel` 必须 live 验证”的本轮要求，因此该项不阻塞 Gate。网络重连、错误凭据和系统性稳定性测试仍留在后续阶段。证据见 `docs/YANDEX_REALTIME_LOCAL_POC.md`。
 
 ### Phase 3 — ROS2 兼容节点骨架
 
@@ -320,22 +320,22 @@ ROS2 Node
 
 任务：
 
-- [ ] 创建 ROS2 Python package。
-- [ ] 实现 `/dialog/start_session`。
-- [ ] 实现 `/dialog/stop_session`。
-- [ ] 实现 `/dialog/text_input`。
-- [ ] 实现 `/dialog/status`。
-- [ ] 实现 `/dialog/text_result`。
-- [ ] 实现 `/audio/dialog_flush`。
-- [ ] 抽象 `/audio/dialog_play`，不猜 `PcmAudioFrame` 字段。
-- [ ] 状态机。
-- [ ] generation/session ID，抑制迟到事件。
-- [ ] 网络 I/O 不阻塞 ROS2 executor。
-- [ ] 参数全部配置化。
-- [ ] 日志脱敏。
-- [ ] 为机器人未知接口保留 Adapter。
+- [x] 创建 ROS2 Python package。
+- [x] 实现 `/dialog/start_session`。
+- [x] 实现 `/dialog/stop_session`。
+- [x] 实现 `/dialog/text_input`。
+- [x] 实现 `/dialog/status`。
+- [x] 实现 `/dialog/text_result`。
+- [x] 实现 `/audio/dialog_flush`。
+- [x] 抽象 `/audio/dialog_play`，不猜 `PcmAudioFrame` 字段。
+- [x] 状态机。
+- [x] generation/session ID，抑制迟到事件。
+- [x] 网络 I/O 不阻塞 ROS2 executor。
+- [x] 参数全部配置化。
+- [x] 日志脱敏。
+- [x] 为机器人未知接口保留 Adapter。
 
-**Gate 3：** ROS2 contract 与状态机可用 mock 测试验证；机器人专有字段允许保留明确 TODO。
+**Gate 3（2026-08-10）：CONDITIONAL PASS。** `realtime_dialog` ament_python package、厂家公开 Service/Topic wrapper、后台 asyncio Yandex client、状态机、generation/stale-event suppression 和机器人音频 Adapter 均已完成，Phase 2 与 Phase 3 共 31 项 pure Python/mock 单测通过。当前 macOS 环境没有 ROS2 Humble/rclpy，因此未实际启动节点；wrapper 已做语法/静态导入检查。`/audio/dialog_play` publisher、麦克风来源、真实音频格式、实机 QoS 与 namespace 继续等待 Phase 4 只读审计，未作猜测。详见 `docs/ROS2_COMPATIBILITY_SKELETON.md`。
 
 ### Phase 4 — 第一次集中只读 SSH 审计
 
@@ -574,15 +574,16 @@ Codex 每次任务必须：
 ## 10. 当前状态
 
 ```text
-Current Phase: Phase 2 — COMPLETE
+Current Phase: Phase 3 — COMPLETE
 Gate 1: CONDITIONAL PASS
 Gate 2: PASS
+Gate 3: CONDITIONAL PASS
 Remote robot changes: NONE
 Remote SSH required now: NO
 Vendor source available: NO
 Yandex production protocol verified: LOCAL ROUTE A CORE PATH VERIFIED WITH speech-realtime-260528
 Local Yandex PoC: COMPLETE
-ROS2 compatibility node: NOT STARTED
+ROS2 compatibility node: LOCAL SKELETON COMPLETE; ROS2 RUNTIME NOT RUN
 Robot runtime snapshot: NOT COLLECTED
 Deployment: NOT STARTED
 ```
@@ -590,10 +591,10 @@ Deployment: NOT STARTED
 ### 当前唯一允许执行的下一步
 
 ```text
-停止在 Gate 2；等待用户明确授权后才可开始 Phase 3 ROS2 兼容节点骨架
+停止在 Gate 3；等待复审和用户明确授权后才可开始 Phase 4 只读审计
 ```
 
-本轮不进入 Phase 3，不写机器人正式 ROS2 集成代码。
+本轮不进入 Phase 4，不 SSH，不读取或修改机器人。
 
 ## 11. Decision Log
 
@@ -607,3 +608,4 @@ Deployment: NOT STARTED
 - **D-008**：`speech-realtime-260528` 作为条件性 primary，`speech-realtime-250923` 作为 Route A fallback；260528 必须先通过 Phase 2 握手、俄语和事件流验证。
 - **D-009**：Gate 1 为 `CONDITIONAL PASS`。官方教程与 Reference 对 260528 和 output delta 存在同步冲突，PCM 字节级契约及会话时限也未完全公开；所有条件均推迟到 Phase 2 实测，失败时不自动切换 Route B。
 - **D-010**：Phase 2 使用 `speech-realtime-260528` 实际跑通当前 endpoint、24 kHz PCM16 mono 麦克风、俄语多轮、增量回答音频和本地播放。用户明确取消“生成中 `response.cancel` 必须 live 验证”的本轮要求；播放中本地停止和 truncate 已实际观察。Gate 2 为 `PASS`，Phase 3 未开始。
+- **D-011**：Phase 3 使用纯 Python core + 薄 ROS2 wrapper：所有 Yandex 网络 I/O 在独立 asyncio worker 执行，ROS 回程经线程安全队列；机器人麦克风和 `PcmAudioFrame` 输出保持 Adapter/TODO。因本机无 ROS2 Humble，mock/core 测试通过后 Gate 3 为 `CONDITIONAL PASS`，Phase 4 未开始。

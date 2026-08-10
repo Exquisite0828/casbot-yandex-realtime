@@ -15,140 +15,32 @@ from dataclasses import dataclass, field
 import json
 import logging
 import os
-import re
+from pathlib import Path
 import sys
 import threading
 import time
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
-CURRENT_ENDPOINT = "wss://ai.api.cloud.yandex.net/v1/realtime"
-PRIMARY_MODEL = "speech-realtime-260528"
-DEFAULT_INSTRUCTIONS = (
-    "Ты дружелюбный голосовой ассистент. Всегда отвечай на русском языке, "
-    "кратко и естественно. Помни контекст текущего разговора."
+SHARED_PACKAGE_ROOT = Path(__file__).resolve().parents[2] / "src" / "realtime_dialog"
+if str(SHARED_PACKAGE_ROOT) not in sys.path:
+    sys.path.insert(0, str(SHARED_PACKAGE_ROOT))
+
+from realtime_dialog.yandex_realtime_client import (  # noqa: E402
+    CURRENT_ENDPOINT,
+    PRIMARY_MODEL,
+    build_audio_append,
+    build_barge_in_events,
+    build_session_update,
+    build_websocket_url,
+    model_label,
+    redact_text,
+    resolve_model_uri,
 )
+
+
 BYTES_PER_FRAME = 2  # signed PCM16 mono
 LOG = logging.getLogger("yandex_realtime_poc")
-
-
-def resolve_model_uri(model_or_uri: str, folder_id: str | None) -> str:
-    """Return the full gpt:// URI without exposing it in logs."""
-    value = model_or_uri.strip()
-    if value.startswith("gpt://"):
-        if not value.removeprefix("gpt://").count("/") == 1:
-            raise ValueError("model URI must be gpt://<folder_id>/<model_id>")
-        return value
-    if "://" in value:
-        raise ValueError("model must be a model ID or gpt:// model URI")
-    if not value:
-        raise ValueError("model must not be empty")
-    if not folder_id:
-        raise ValueError(
-            "YANDEX_FOLDER_ID is required when the model is not a complete gpt:// URI"
-        )
-    return f"gpt://{folder_id}/{value}"
-
-
-def build_websocket_url(endpoint: str, model_uri: str) -> str:
-    """Attach the model query to the current WSS endpoint."""
-    parsed = urlsplit(endpoint.strip())
-    if "rest-assistant.api.cloud.yandex.net" in parsed.netloc:
-        raise ValueError("legacy Yandex Realtime endpoint is forbidden")
-    if parsed.scheme != "wss":
-        raise ValueError("YANDEX_REALTIME_ENDPOINT must use wss://")
-    if parsed.netloc != "ai.api.cloud.yandex.net" or parsed.path.rstrip("/") != "/v1/realtime":
-        raise ValueError("endpoint must be the current Yandex /v1/realtime endpoint")
-    query = [(key, value) for key, value in parse_qsl(parsed.query) if key != "model"]
-    query.append(("model", model_uri))
-    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), ""))
-
-
-def build_session_update(
-    *,
-    sample_rate: int,
-    voice: str,
-    vad_threshold: float,
-    silence_ms: int,
-    instructions: str = DEFAULT_INSTRUCTIONS,
-) -> dict[str, object]:
-    """Build the current 2026 Yandex Realtime session schema."""
-    return {
-        "type": "session.update",
-        "session": {
-            "instructions": instructions,
-            "output_modalities": ["audio"],
-            "audio": {
-                "input": {
-                    "format": {"type": "audio/pcm", "rate": sample_rate},
-                    "languages": ["ru-RU"],
-                    "turn_detection": {
-                        "type": "server_vad",
-                        "threshold": vad_threshold,
-                        "silence_duration_ms": silence_ms,
-                    },
-                },
-                "output": {
-                    "format": {"type": "audio/pcm", "rate": sample_rate},
-                    "voice": voice,
-                },
-            },
-        },
-    }
-
-
-def build_audio_append(pcm: bytes) -> dict[str, str]:
-    return {
-        "type": "input_audio_buffer.append",
-        "audio": base64.b64encode(pcm).decode("ascii"),
-    }
-
-
-def build_barge_in_events(
-    *,
-    response_id: str | None,
-    item_id: str | None,
-    content_index: int,
-    played_ms: int,
-) -> list[dict[str, object]]:
-    events: list[dict[str, object]] = []
-    if response_id:
-        events.append({"type": "response.cancel", "response_id": response_id})
-    if item_id:
-        events.append(
-            {
-                "type": "conversation.item.truncate",
-                "item_id": item_id,
-                "content_index": content_index,
-                "audio_end_ms": max(0, played_ms),
-            }
-        )
-    return events
-
-
-def model_label(model_uri: str) -> str:
-    """Return only the non-sensitive model ID for console output."""
-    return model_uri.rstrip("/").rsplit("/", 1)[-1]
-
-
-def redact_text(text: str, *, secrets: tuple[str, ...] = ()) -> str:
-    """Redact credentials before a remote error reaches the console."""
-    result = text
-    for secret in secrets:
-        if secret:
-            result = result.replace(secret, "<redacted>")
-    result = re.sub(
-        r"(?i)(authorization\s*[:=]\s*(?:api-key|bearer)\s+)[^\s;,]+",
-        r"\1<redacted>",
-        result,
-    )
-    result = re.sub(
-        r"(?i)(api[_-]?key\s*[:=]\s*)[^\s;,]+",
-        r"\1<redacted>",
-        result,
-    )
-    return result
 
 
 @dataclass(frozen=True, slots=True)
