@@ -14,10 +14,12 @@ CASBOT Yandex Realtime Migration
 Phase 0 — COMPLETE
 Phase 1 — COMPLETE
 Gate 1 — CONDITIONAL PASS
-Phase 2 — NOT STARTED
+Phase 2 — COMPLETE
+Gate 2 — PASS
+Phase 3 — NOT STARTED
 ```
 
-Gate 1 的条件是 Phase 2 必须实际验证 `speech-realtime-260528` 握手、增量回答音频、PCM 字节契约、打断/截断、俄语、长连接和 Billing；260528 失败时先在同一 Route A 上回退 `speech-realtime-250923`。本状态不表示已经进入 Phase 2。
+本地 Phase 2 真人 PoC 已使用 `speech-realtime-260528` 跑通当前 WebSocket、24 kHz PCM 麦克风输入、俄语多轮回答、增量回答音频和本地扬声器输出；未使用 fallback。播放中本地停止与 truncate 曾实际成功，用户随后明确取消了“生成中 response.cancel 必须 live 验证”的本轮要求。详见 `docs/YANDEX_REALTIME_LOCAL_POC.md`。Phase 3 尚未开始。
 
 ## Key documents
 
@@ -25,6 +27,7 @@ Gate 1 的条件是 Phase 2 必须实际验证 `speech-realtime-260528` 握手�
 AGENTS.md
 docs/YANDEX_REALTIME_MIGRATION_PLAN.md
 docs/YANDEX_REALTIME_VERIFIED.md
+docs/YANDEX_REALTIME_LOCAL_POC.md
 docs/RUNTIME_SNAPSHOT.md
 docs/vendor/二开文档.md
 ```

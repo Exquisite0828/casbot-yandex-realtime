@@ -1,7 +1,7 @@
 # CASBOT → Yandex Realtime 迁移实施计划
 
 > 版本：v1.0  
-> 状态：Phase 1 已完成；Gate 1 为 CONDITIONAL PASS；Phase 2 未开始
+> 状态：Phase 2 已完成；Gate 2 为 PASS；Phase 3 未开始
 > 目标平台：Linux / ROS2 Humble / Python 3.10  
 > 核心原则：本地开发优先、最少 SSH、保持机器人外部 ROS2 契约不变、可快速回滚。
 
@@ -291,19 +291,19 @@ Metrics
 
 必测：
 
-- [ ] 连接和鉴权。
-- [ ] 连续输入语音。
-- [ ] 俄语回答文本。
-- [ ] 回答语音。
-- [ ] 多轮会话。
-- [ ] 用户插话。
-- [ ] 取消旧回答。
+- [x] 连接和鉴权。
+- [x] 连续输入语音。
+- [x] 俄语回答文本。
+- [x] 回答语音。
+- [x] 多轮会话。
+- [x] 用户插话（实际观察到本地停止、truncate 和后续新回答；用户随后取消其 Gate 要求）。
+- [ ] 取消生成中的旧回答（决策逻辑已有单元测试；用户明确取消本轮 live 验证要求）。
 - [ ] 网络断开 / 重连。
 - [ ] API Key 错误。
-- [ ] 超时。
-- [ ] 连接、首响应、首音、总延迟。
+- [x] 超时（发现并移除会导致静默期客户端 1006 的可选 aiohttp heartbeat；75 秒复验通过原断点）。
+- [x] 连接、首响应、首音、总延迟（仅记录观察值，不作为性能基准）。
 
-**Gate 2：** 本地 Realtime PoC 稳定通过后再接 ROS2。
+**Gate 2（2026-08-10）：PASS。** `speech-realtime-260528` 已通过当前 endpoint 建立真实 session，并以本地 24 kHz PCM16 mono 麦克风完成俄语转写、多轮回答、增量音频返回与本地扬声器输出；未使用 fallback。一次播放中插话实际完成本地停止、truncate 与新回答。用户随后明确取消“生成中 response.cancel 必须 live 验证”的本轮要求，因此该项不阻塞 Gate。网络重连、错误凭据和系统性稳定性测试仍留在后续阶段。证据见 `docs/YANDEX_REALTIME_LOCAL_POC.md`。Phase 3 未开始。
 
 ### Phase 3 — ROS2 兼容节点骨架
 
@@ -574,13 +574,14 @@ Codex 每次任务必须：
 ## 10. 当前状态
 
 ```text
-Current Phase: Phase 1 — COMPLETE
+Current Phase: Phase 2 — COMPLETE
 Gate 1: CONDITIONAL PASS
+Gate 2: PASS
 Remote robot changes: NONE
 Remote SSH required now: NO
 Vendor source available: NO
-Yandex production protocol verified: DOCUMENTATION COMPLETE; RUNTIME CONDITIONS DEFERRED TO PHASE 2
-Local Yandex PoC: NOT STARTED
+Yandex production protocol verified: LOCAL ROUTE A CORE PATH VERIFIED WITH speech-realtime-260528
+Local Yandex PoC: COMPLETE
 ROS2 compatibility node: NOT STARTED
 Robot runtime snapshot: NOT COLLECTED
 Deployment: NOT STARTED
@@ -589,10 +590,10 @@ Deployment: NOT STARTED
 ### 当前唯一允许执行的下一步
 
 ```text
-等待用户复审；经用户确认后，下一项才是 Phase 2 本地 Yandex Realtime PoC
+停止在 Gate 2；等待用户明确授权后才可开始 Phase 3 ROS2 兼容节点骨架
 ```
 
-本轮不进入 Phase 2。在 Gate 2 通过之前，不写机器人正式 ROS2 集成代码。
+本轮不进入 Phase 3，不写机器人正式 ROS2 集成代码。
 
 ## 11. Decision Log
 
@@ -605,3 +606,4 @@ Deployment: NOT STARTED
 - **D-007**：以 2026 当前 Realtime API 和 `wss://ai.api.cloud.yandex.net/v1/realtime` 为唯一实现基线；2025 旧 endpoint / interaction format 禁止作为实现依据。
 - **D-008**：`speech-realtime-260528` 作为条件性 primary，`speech-realtime-250923` 作为 Route A fallback；260528 必须先通过 Phase 2 握手、俄语和事件流验证。
 - **D-009**：Gate 1 为 `CONDITIONAL PASS`。官方教程与 Reference 对 260528 和 output delta 存在同步冲突，PCM 字节级契约及会话时限也未完全公开；所有条件均推迟到 Phase 2 实测，失败时不自动切换 Route B。
+- **D-010**：Phase 2 使用 `speech-realtime-260528` 实际跑通当前 endpoint、24 kHz PCM16 mono 麦克风、俄语多轮、增量回答音频和本地播放。用户明确取消“生成中 `response.cancel` 必须 live 验证”的本轮要求；播放中本地停止和 truncate 已实际观察。Gate 2 为 `PASS`，Phase 3 未开始。

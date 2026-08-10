@@ -5,8 +5,13 @@
 ```text
 Phase 1 verification: COMPLETE
 Gate 1: CONDITIONAL PASS
-Phase 2: NOT STARTED
+Phase 2 live PoC: COMPLETE
+Gate 2: PASS
 ```
+
+Phase 2 的本地运行时证据与用户调整后的 Gate 结论记录在
+`docs/YANDEX_REALTIME_LOCAL_POC.md`。本文其余正文保留 Phase 1 官方资料核验时的
+证据口径；其中“本轮未连接 API”等描述是 Phase 1 历史说明，不用于否认后续 PoC。
 
 ## Verification date
 
