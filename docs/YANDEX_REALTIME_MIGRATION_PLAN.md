@@ -1,7 +1,7 @@
 # CASBOT → Yandex Realtime 迁移实施计划
 
 > 版本：v1.0  
-> 状态：准备开工  
+> 状态：Phase 1 已完成；Gate 1 为 CONDITIONAL PASS；Phase 2 未开始
 > 目标平台：Linux / ROS2 Humble / Python 3.10  
 > 核心原则：本地开发优先、最少 SSH、保持机器人外部 ROS2 契约不变、可快速回滚。
 
@@ -243,24 +243,24 @@ casbot-yandex-realtime/
 
 只使用当前 Yandex 官方资料确认：
 
-- [ ] Realtime WebSocket endpoint。
-- [ ] 鉴权方式。
-- [ ] model / agent / session 指定方式。
-- [ ] 输入 PCM 格式、采样率、声道。
-- [ ] 输出音频实时能力。
-- [ ] transcription / response 事件。
-- [ ] session update。
-- [ ] VAD。
-- [ ] 用户打断。
-- [ ] assistant truncate/cancel。
-- [ ] 心跳、超时、最大会话时长。
-- [ ] 错误事件与限流。
-- [ ] 俄语支持、voice/role。
-- [ ] Preview / GA 状态与限制。
+- [x] Realtime WebSocket endpoint — 当前为 `wss://ai.api.cloud.yandex.net/v1/realtime`；旧 endpoint 已停止支持。
+- [x] 鉴权方式 — API Key / IAM token、`ai.models.user` 与 API key scope 已核验。
+- [x] model / agent / session 指定方式 — model URI 通过 URL query；当前无独立 agent 参数；行为通过 session 配置。
+- [x] 输入 PCM 格式、采样率、声道 — `audio/pcm` + Base64 raw bytes；官方 helper 使用 mono int16；完整 rate 范围和 Realtime endian 未直接公布，留给 Phase 2。
+- [x] 输出音频实时能力 — 当前官方教程/示例使用 `response.output_audio.delta`；Reference 的 unsupported 标记冲突已记录并留给 Phase 2 实测。
+- [x] transcription / response 事件 — final input transcription、response lifecycle、text/audio delta 及 Reference 限制已核验。
+- [x] session update — `session.update` patch 与 `session.updated` 回执已核验。
+- [x] VAD — `server_vad`、`threshold`、`silence_duration_ms`、speech started/stopped 和 manual turn 已核验。
+- [x] 用户打断 — `speech_started` 与官方示例本地清播放队列行为已核验。
+- [x] assistant truncate/cancel — `response.cancel`、`conversation.item.truncate` 字段和完成事件已核验。
+- [x] 心跳、超时、最大会话时长 — 官方未公开 maximum/idle 数值或强制 heartbeat；结论为 `NOT DOCUMENTED`，运行时验证推迟到 Phase 2。
+- [x] 错误事件与限流 — error schema、通用 HTTP 状态、默认 10 并发 session / 10 次每秒建连 quota、`rate_limits.updated` 不支持已核验。
+- [x] 俄语支持、voice/role — 250923 明确面向 Russian/Kazakh；Realtime 兼容 SpeechKit voices/roles；260528 俄语效果作为 Phase 2 条件。
+- [x] Preview / GA 状态与限制 — 最新明确状态仍为 Preview，未找到后续 GA announcement；2026 协议迁移和文档冲突已记录。
 
 交付：`docs/YANDEX_REALTIME_VERIFIED.md`
 
-**Gate 1：** 官方资料必须证明能形成满足项目需求的“实时语音输入 → 实时回答语音输出”链路。否则停止并报告，不能自动切换架构。
+**Gate 1（2026-08-10）：CONDITIONAL PASS。** 官方资料已证明能形成满足项目需求的“实时语音输入 → 模型理解/生成 → 增量回答语音与文本输出”单条 Route A，不需要自动切换架构。条件是 Phase 2 必须验证 260528 握手、实际 audio delta、PCM 字节契约、cancel/truncate 打断一致性、俄语、长连接和 Billing；260528 失败先回退 250923，两者核心实时音频均失败则停止并重审 Gate。详见 `docs/YANDEX_REALTIME_VERIFIED.md`。
 
 ### Phase 2 — 本地 Yandex Realtime PoC
 
@@ -574,11 +574,12 @@ Codex 每次任务必须：
 ## 10. 当前状态
 
 ```text
-Current Phase: Phase 1 — NOT STARTED
+Current Phase: Phase 1 — COMPLETE
+Gate 1: CONDITIONAL PASS
 Remote robot changes: NONE
 Remote SSH required now: NO
 Vendor source available: NO
-Yandex production protocol verified: NOT YET
+Yandex production protocol verified: DOCUMENTATION COMPLETE; RUNTIME CONDITIONS DEFERRED TO PHASE 2
 Local Yandex PoC: NOT STARTED
 ROS2 compatibility node: NOT STARTED
 Robot runtime snapshot: NOT COLLECTED
@@ -588,10 +589,10 @@ Deployment: NOT STARTED
 ### 当前唯一允许执行的下一步
 
 ```text
-Phase 1 核验 Yandex 当前官方 Realtime API
+等待用户复审；经用户确认后，下一项才是 Phase 2 本地 Yandex Realtime PoC
 ```
 
-在 Gate 1 通过之前，不写机器人正式 ROS2 集成代码。
+本轮不进入 Phase 2。在 Gate 2 通过之前，不写机器人正式 ROS2 集成代码。
 
 ## 11. Decision Log
 
@@ -601,3 +602,6 @@ Phase 1 核验 Yandex 当前官方 Realtime API
 - **D-004**：SSH 集中到 Phase 4 和 Phase 8，前期尽量全部本地完成。
 - **D-005**：机器人专有未知信息通过 Adapter / 配置隔离，不在代码中推测。
 - **D-006**：Yandex Realtime 是快速变化接口；必须先核验当前官方协议，禁止沿用旧事件或旧 endpoint。
+- **D-007**：以 2026 当前 Realtime API 和 `wss://ai.api.cloud.yandex.net/v1/realtime` 为唯一实现基线；2025 旧 endpoint / interaction format 禁止作为实现依据。
+- **D-008**：`speech-realtime-260528` 作为条件性 primary，`speech-realtime-250923` 作为 Route A fallback；260528 必须先通过 Phase 2 握手、俄语和事件流验证。
+- **D-009**：Gate 1 为 `CONDITIONAL PASS`。官方教程与 Reference 对 260528 和 output delta 存在同步冲突，PCM 字节级契约及会话时限也未完全公开；所有条件均推迟到 Phase 2 实测，失败时不自动切换 Route B。
