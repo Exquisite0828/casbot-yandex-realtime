@@ -228,14 +228,14 @@ casbot-yandex-realtime/
 
 ### Phase 0 — 初始化与证据冻结
 
-- [ ] 初始化本地 Git 仓库。
-- [ ] 保存本计划。
-- [ ] 创建 `AGENTS.md`。
-- [ ] 创建 `.gitignore`。
-- [ ] 创建 `config/example.env`。
-- [ ] 确认任何真实 API Key 都不会进入 Git。
-- [ ] 创建 `docs/YANDEX_REALTIME_VERIFIED.md`。
-- [ ] 创建 `docs/RUNTIME_SNAPSHOT.md` 空模板。
+- [x] 初始化本地 Git 仓库。
+- [x] 保存本计划。
+- [x] 创建 `AGENTS.md`。
+- [x] 创建 `.gitignore`。
+- [x] 创建 `config/example.env`。
+- [x] 确认任何真实 API Key 都不会进入 Git。
+- [x] 创建 `docs/YANDEX_REALTIME_VERIFIED.md`。
+- [x] 创建 `docs/RUNTIME_SNAPSHOT.md` 空模板。
 
 **Gate 0：** 仅完成项目骨架与安全规则，不连接机器人。
 
@@ -574,7 +574,7 @@ Codex 每次任务必须：
 ## 10. 当前状态
 
 ```text
-Current Phase: Phase 0 → Phase 1
+Current Phase: Phase 1 — NOT STARTED
 Remote robot changes: NONE
 Remote SSH required now: NO
 Vendor source available: NO
@@ -588,8 +588,6 @@ Deployment: NOT STARTED
 ### 当前唯一允许执行的下一步
 
 ```text
-Phase 0 初始化项目
-+
 Phase 1 核验 Yandex 当前官方 Realtime API
 ```
 

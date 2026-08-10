@@ -11,7 +11,8 @@ CASBOT Yandex Realtime Migration
 ## Current status
 
 ```text
-Phase 0 — Project initialization
+Phase 0 — COMPLETE
+Phase 1 — NOT STARTED
 ```
 
 ## Key documents

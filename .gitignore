@@ -25,5 +25,8 @@ log/
 # Runtime data
 runtime_snapshot/raw/
 
+# One-time Codex task file
+CODEX_EXECUTION_TASK.md
+
 # Logs
 *.log
