@@ -95,22 +95,66 @@ model/model URI, folder ID, Yandex-side sample rate, voice, VAD threshold,
 silence duration, instructions, and connect/setup timeouts are non-secret ROS
 parameters.
 
-## Adapter boundary and Phase 4 unknowns
+## Phase 4 runtime evidence and Adapter handoff
 
-`PendingRobotMicAdapter` deliberately supplies no audio. Phase 4 must determine:
+Phase 4 read-only runtime evidence, frozen on 2026-08-11, resolved the hardware
+and ROS boundary facts that Phase 3 intentionally left open.
 
-- whether the microphone source is a ROS2 topic or ALSA;
-- real sample rate, bit depth, channel count, and frame size.
+**VERIFIED:**
 
-`PendingRobotAudioOutputAdapter` can publish flush through the wrapper but
-rejects PCM writes until the real message schema is known. Phase 4 must inspect:
+```text
+actual dialog node: /lzdl10823/dialog_node
+actual namespace: /lzdl10823
+runtime executable:
+  /lingze/install/lingze_omni_s2s/lib/lingze_omni_s2s/dialog_node
 
-- the exact `lingze_msgs/msg/PcmAudioFrame` fields;
-- `/audio/dialog_play` and `/dialog/status` QoS;
-- actual node name/namespace and topic remapping behavior;
-- original status ordering and stop/flush behavior.
+microphone source: direct ALSA capture, not an observed ROS2 input subscription
+capture device: /dev/snd/pcmC0D0c (Yundea 1076 USB Audio)
+capture PCM: MMAP_INTERLEAVED, S16_LE, mono, 16000 Hz
+period_size: 1024 frames
+buffer_size: 16384 frames
+```
 
-These are explicit integration unknowns, not Phase 3 implementation facts.
+The installed `lingze_msgs/msg/PcmAudioFrame` schema is:
+
+```text
+builtin_interfaces/Time stamp
+uint32 sample_rate
+uint8 channels
+string format
+uint8[] data
+```
+
+Observed QoS:
+
+| Topic | Reliability | Durability | History depth |
+|---|---|---|---|
+| `/lzdl10823/audio/dialog_play` | RELIABLE | VOLATILE | UNKNOWN |
+| `/lzdl10823/audio/dialog_flush` | RELIABLE | VOLATILE | UNKNOWN |
+| `/lzdl10823/dialog/status` | RELIABLE | TRANSIENT_LOCAL | UNKNOWN |
+| `/lzdl10823/dialog/text_result` | RELIABLE | VOLATILE | UNKNOWN |
+
+`/lzdl10823/dialog/session_active` is also published with RELIABLE +
+TRANSIENT_LOCAL QoS and has a live `face_play_example` subscriber. It was not in
+the early public compatibility list, so Phase 5 must evaluate and likely retain
+it. `/lzdl10823/dialog/input_waveform` is a BEST_EFFORT + VOLATILE output of
+`dialog_node`, not a microphone input.
+
+The Phase 3 code remains a skeleton: `PendingRobotMicAdapter` still supplies no
+audio, and `PendingRobotAudioOutputAdapter` still has no
+`PcmAudioFrame` publisher. Phase 5 must implement those adapters and namespace
+alignment using the verified facts above.
+
+Still unresolved without guesswork:
+
+- **DEFERRED:** actual string expected in `PcmAudioFrame.format`;
+- **NOT OBSERVED / DEFERRED:** whether `audio_speaker_node` resamples input or
+  converts mono to stereo, and its accepted frame combinations;
+- **DEFERRED:** use Yandex at 16 kHz or resample 16 kHz → 24 kHz;
+- **NOT COLLECTED:** exact original status sequence and black-box experience
+  baseline.
+
+See `docs/RUNTIME_SNAPSHOT.md` for the complete evidence and caveats.
 
 ## Local verification
 
@@ -139,9 +183,12 @@ Gate 3.
 ```text
 Gate 3: CONDITIONAL PASS
 Phase 3: COMPLETE
-Phase 4: NOT STARTED
+Phase 4: COMPLETE
+Gate 4: PASS
+Phase 5: NOT STARTED
 ```
 
-The next step requires a separate user authorization for Phase 4 read-only
-robot inspection. No SSH, deployment, robot change, commit, or push was
-performed in Phase 3.
+Gate 3 remains the historical Phase 3 result: the local Mac could not launch a
+ROS2 Humble wrapper. Phase 4 later froze the robot interface facts without
+changing that historical conclusion. No Phase 5 adapter implementation or
+deployment has started.

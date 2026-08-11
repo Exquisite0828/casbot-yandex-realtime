@@ -1,7 +1,7 @@
 # CASBOT → Yandex Realtime 迁移实施计划
 
 > 版本：v1.0  
-> 状态：Phase 3 已完成；Gate 3 为 CONDITIONAL PASS；Phase 4 未开始
+> 状态：Phase 4 已完成；Gate 4 为 PASS；Phase 5 未开始
 > 目标平台：Linux / ROS2 Humble / Python 3.10  
 > 核心原则：本地开发优先、最少 SSH、保持机器人外部 ROS2 契约不变、可快速回滚。
 
@@ -186,24 +186,24 @@ TTS
 
 Yandex Realtime API 在 2026 年发生过协议格式与 endpoint 调整，因此禁止根据旧博客、旧示例或记忆直接实现。
 
-## 4. 当前未知项
+## 4. Phase 4 后的运行时事实与未知项
 
-以下未知项 **不阻塞 Phase 1 本地开发**，但会阻塞最终机器人接入：
-
-| 未知项 | 用途 | 解决时间 |
+| 项目 | 状态 | 结论 / 后续用途 |
 |---|---|---|
-| 麦克风通过 ROS2 Topic 还是直接 ALSA 采集 | 选择 Mic Adapter | 第一次 SSH |
-| 麦克风采样率 / 位深 / 声道 / 帧大小 | 输入 Yandex | 第一次 SSH |
-| `PcmAudioFrame.msg` 的真实字段 | 输出给 speaker | 第一次 SSH |
-| `/dialog/status` 的实际 QoS | 完整兼容 | 第一次 SSH |
-| 原节点真正的节点名 / namespace | 兼容部署 | 第一次 SSH |
-| 原节点由哪个 systemd / launch 启动 | 停旧启新 | 第一次 SSH |
-| 当前模型准确 ID | 基线与成本对比 | 第一次 SSH / 厂家 |
-| 当前是否输入摄像头/视觉给 Omni | 防止功能回退 | 第一次 SSH + 黑盒测试 |
-| 当前 system prompt / persona 来源 | 保持回答风格 | 可获得则采集；否则重新定义 |
-| 当前音色 / VAD / 打断行为 | 体验对齐 | 黑盒基线测试 |
+| 麦克风入口 | VERIFIED | `dialog_node` 直接持有 ALSA `/dev/snd/pcmC0D0c`；未观察到 ROS2 mic 输入订阅 |
+| 麦克风 PCM | VERIFIED | MMAP_INTERLEAVED、S16_LE、mono、16 kHz、period 1024、buffer 16384 |
+| `PcmAudioFrame` 字段 | VERIFIED | `stamp`、`sample_rate`、`channels`、`format`、`data` |
+| `PcmAudioFrame.format` 实际值 | DEFERRED | Phase 5 必须从兼容行为确定，禁止猜字符串 |
+| dialog play/flush/status/text QoS | VERIFIED | Reliability/Durability 已冻结；CLI 的 history depth 为 UNKNOWN，精确值 NOT COLLECTED |
+| 实际节点 / namespace | VERIFIED | `/lzdl10823/dialog_node`，namespace `/lzdl10823` |
+| systemd / launch 入口 | VERIFIED | `lingze_robot.service → /lingze/bin/start_robot.sh`；进程树观察到 `ros2 launch bringup bringup.launch.py` |
+| ROS2 视觉输入 | NOT OBSERVED | `dialog_node` 无 camera/image subscriber；不证明闭源进程未通过非 ROS2 路径访问摄像头 |
+| speaker 输入转换 / 重采样 | NOT OBSERVED / DEFERRED | 播放硬件为 48 kHz stereo 不证明发布端格式；Phase 5 解决 |
+| 当前云端模型准确 ID | NOT COLLECTED | `lingze_omni_s2s` 仅是运行时包名；Qwen 具体型号仍是工作假设 |
+| 当前 system prompt / persona | NOT COLLECTED / DEFERRED | 可获得则采集，否则重新定义并在验收中确认 |
+| 原系统真人黑盒体验基线 | NOT COLLECTED / DEFERRED | 用户决定推迟到集成/验收，不阻塞 Gate 4 |
 
-原则：未知项必须通过 Adapter / 配置边界隔离，禁止在本地代码中猜死。
+原则：已验证事实用于 Phase 5 Adapter；未观察或推迟项继续通过 Adapter / 配置边界隔离，禁止猜测硬编码。
 
 ## 5. 推荐本地项目结构
 
@@ -339,47 +339,21 @@ ROS2 Node
 
 ### Phase 4 — 第一次集中只读 SSH 审计
 
-原则：
+只读审计结果：
 
-- 只读；
-- 不复制厂家源码；
-- 不保存真实 Token；
-- 不 restart；
-- 不 kill；
-- 不修改 systemd；
-- 输出集中保存到 `docs/RUNTIME_SNAPSHOT.md` 或 `runtime_snapshot/`。
+- [x] 保持只读；未 restart、stop、kill、上传、安装或修改 systemd。
+- [x] 取得实际 node、namespace、Topic、Service 与 consumer contract。
+- [x] 取得 dialog play、dialog flush、status、text result、input waveform、session active QoS。
+- [x] 取得麦克风入口：`dialog_node` 直接 ALSA capture。
+- [x] 取得输入 PCM：S16_LE、mono、16 kHz、period/buffer 参数。
+- [x] 取得 `PcmAudioFrame` schema；实际 `format` 值保持 DEFERRED。
+- [x] 取得 speaker 节点、播放设备、speaker-active 与嘴型链路。
+- [x] 取得 `lingze_robot.service` 与观测到的 ROS launch 入口。
+- [x] 检查 ROS2 视觉订阅：`dialog_node` 未观察到 camera/image subscription。
+- [x] 将永久结论和证据 caveat 写入 `docs/RUNTIME_SNAPSHOT.md`。
+- [ ] 原系统真人黑盒 baseline：用户决定推迟到集成/验收；不阻塞 Gate 4。
 
-采集：
-
-```bash
-ros2 node list
-ros2 topic list -t
-ros2 service list -t
-ros2 node info <actual_node>
-ros2 param list <actual_node>
-ros2 param dump <actual_node>
-
-ros2 interface show lingze_msgs/msg/PcmAudioFrame
-ros2 topic info -v /audio/dialog_play
-ros2 topic info -v /dialog/status
-
-arecord -l
-arecord -L
-
-ps -ef | grep -E "realtime_dialog|ros2|launch" | grep -v grep
-systemctl list-units --type=service --all | grep -Ei "lingze|dialog|bringup|ros"
-```
-
-定位实际 service 后：
-
-```bash
-systemctl cat <actual_service>
-systemctl show <actual_service>   -p FragmentPath   -p DropInPaths   -p ExecStart   -p WorkingDirectory   -p EnvironmentFiles
-```
-
-同时记录原系统黑盒基线：首音延迟、打断、俄语回答、状态序列、speaker/嘴型、是否有视觉依赖。
-
-**Gate 4：** 必须拿到麦克风入口、音频格式、`PcmAudioFrame`、QoS、服务停启方式和真实外部契约。
+**Gate 4（2026-08-11）：PASS。** 麦克风入口、实际输入 PCM、`PcmAudioFrame` schema、实际 QoS、node/namespace、service/startup 方法和 ROS2 外部契约均已由只读运行时证据覆盖。`PcmAudioFrame.format`、speaker 转换行为及 16 → 24 kHz 策略属于 Phase 5 适配决策；真人黑盒 baseline 经用户明确推迟，不作为本 Gate 阻塞项。Phase 4 原始证据仅保存在 Git ignored 的 `runtime_snapshot/raw/`，永久结论见 `docs/RUNTIME_SNAPSHOT.md`。
 
 ### Phase 5 — 机器人适配
 
@@ -574,27 +548,29 @@ Codex 每次任务必须：
 ## 10. 当前状态
 
 ```text
-Current Phase: Phase 3 — COMPLETE
+Current Phase: Phase 4 — COMPLETE
 Gate 1: CONDITIONAL PASS
 Gate 2: PASS
 Gate 3: CONDITIONAL PASS
+Gate 4: PASS
 Remote robot changes: NONE
 Remote SSH required now: NO
 Vendor source available: NO
 Yandex production protocol verified: LOCAL ROUTE A CORE PATH VERIFIED WITH speech-realtime-260528
 Local Yandex PoC: COMPLETE
 ROS2 compatibility node: LOCAL SKELETON COMPLETE; ROS2 RUNTIME NOT RUN
-Robot runtime snapshot: NOT COLLECTED
+Robot runtime snapshot: PHASE 4 READ-ONLY EVIDENCE FROZEN
+Robot adaptation: NOT STARTED
 Deployment: NOT STARTED
 ```
 
 ### 当前唯一允许执行的下一步
 
 ```text
-停止在 Gate 3；等待复审和用户明确授权后才可开始 Phase 4 只读审计
+Phase 5 — Robot interface adaptation
 ```
 
-本轮不进入 Phase 4，不 SSH，不读取或修改机器人。
+Phase 5 尚未开始；必须等待 Gate 4 复审和用户明确授权。
 
 ## 11. Decision Log
 
@@ -609,3 +585,8 @@ Deployment: NOT STARTED
 - **D-009**：Gate 1 为 `CONDITIONAL PASS`。官方教程与 Reference 对 260528 和 output delta 存在同步冲突，PCM 字节级契约及会话时限也未完全公开；所有条件均推迟到 Phase 2 实测，失败时不自动切换 Route B。
 - **D-010**：Phase 2 使用 `speech-realtime-260528` 实际跑通当前 endpoint、24 kHz PCM16 mono 麦克风、俄语多轮、增量回答音频和本地播放。用户明确取消“生成中 `response.cancel` 必须 live 验证”的本轮要求；播放中本地停止和 truncate 已实际观察。Gate 2 为 `PASS`，Phase 3 未开始。
 - **D-011**：Phase 3 使用纯 Python core + 薄 ROS2 wrapper：所有 Yandex 网络 I/O 在独立 asyncio worker 执行，ROS 回程经线程安全队列；机器人麦克风和 `PcmAudioFrame` 输出保持 Adapter/TODO。因本机无 ROS2 Humble，mock/core 测试通过后 Gate 3 为 `CONDITIONAL PASS`，Phase 4 未开始。
+- **D-012**：实机实际 dialog node 为 `/lzdl10823/dialog_node`，namespace 为 `/lzdl10823`，runtime package/executable 为 `lingze_omni_s2s/dialog_node`；包名不证明准确云端模型 ID。
+- **D-013**：当前 `dialog_node` 直接通过 ALSA `/dev/snd/pcmC0D0c` 采集 S16_LE、mono、16 kHz 音频；未观察到 ROS2 microphone input subscription。
+- **D-014**：`PcmAudioFrame` schema 与 dialog play/dialog flush/status/text result QoS 已通过运行时证据冻结；`format` 实际值和 speaker conversion behavior 仍 DEFERRED，禁止猜测。
+- **D-015**：`/lzdl10823/dialog/session_active` 在实机由 `dialog_node` 发布且有 `face_play_example` consumer，Phase 5 纳入兼容评估。
+- **D-016**：原系统真人黑盒 baseline 经用户决定推迟到集成/验收，不作为 Gate 4 阻塞项；其余 Gate 4 核心证据齐备，因此 Gate 4 为 `PASS`，Phase 5 未开始。
