@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Callable, Protocol
+from typing import Awaitable, Callable, Protocol
 
 from .adapters import AudioOutputAdapter, MicAdapter
 from .ros_contract import (
@@ -71,6 +71,9 @@ class DialogController:
         self._microphone_sender_task: asyncio.Task[None] | None = None
         self._microphone_dropped_chunks = 0
         self._accept_events = False
+        self._lifecycle_lock = asyncio.Lock()
+        self._failure_task: asyncio.Task[None] | None = None
+        self._last_error: str | None = None
         self._client.set_event_handler(self.handle_event)
         self._audio_output.set_generation(self._generation_id)
 
@@ -94,6 +97,10 @@ class DialogController:
     def microphone_dropped_chunks(self) -> int:
         return self._microphone_dropped_chunks
 
+    @property
+    def last_error(self) -> str | None:
+        return self._last_error
+
     def _set_state(self, state: str) -> None:
         if state == self._state:
             return
@@ -115,8 +122,33 @@ class DialogController:
         return self._generation_id
 
     async def start_session(self) -> ControllerResult:
+        return await self._run_command(
+            lambda: self._start_session(start_microphone=True)
+        )
+
+    async def _run_command(
+        self,
+        transition: Callable[[], Awaitable[ControllerResult]],
+    ) -> ControllerResult:
         async with self._command_lock:
-            return await self._start_session(start_microphone=True)
+            while True:
+                await self._await_failure_cleanup()
+                pending_failure: asyncio.Task[None] | None = None
+                async with self._lifecycle_lock:
+                    failure_task = self._failure_task
+                    if (
+                        failure_task is None
+                        or failure_task.done()
+                        or failure_task is asyncio.current_task()
+                    ):
+                        return await transition()
+                    pending_failure = failure_task
+                await asyncio.gather(pending_failure, return_exceptions=True)
+
+    async def _await_failure_cleanup(self) -> None:
+        failure_task = self._failure_task
+        if failure_task is not None and failure_task is not asyncio.current_task():
+            await asyncio.gather(failure_task, return_exceptions=True)
 
     async def _start_session(self, *, start_microphone: bool) -> ControllerResult:
         if self._state not in {STATUS_IDLE, STATUS_ERROR}:
@@ -133,16 +165,16 @@ class DialogController:
         self._loop = asyncio.get_running_loop()
         generation = self._advance_generation()
         self._accept_events = True
+        self._last_error = None
         self._set_state(STATUS_CONNECTING)
         try:
             await self._client.connect(generation)
             if start_microphone:
                 await self._start_microphone_uplink()
         except Exception as error:
-            self._accept_events = False
-            await self._stop_microphone_uplink()
-            self._set_state(STATUS_ERROR)
-            return ControllerResult(False, f"session start failed: {error}")
+            message = f"session start failed: {error}"
+            await self._fail_active_session_owned(message, generation)
+            return ControllerResult(False, message)
         return ControllerResult(True, "session started")
 
     async def _start_microphone_uplink(self) -> None:
@@ -214,18 +246,10 @@ class DialogController:
             or not self._accept_events
         ):
             return
-        self._accept_events = False
-        self._clear_microphone_queue()
-        self._microphone_started = False
-        try:
-            self._mic.stop()
-        except Exception:
-            pass
-        sender = self._microphone_sender_task
-        self._microphone_sender_task = None
-        if sender is not None:
-            sender.cancel()
-        self._set_state(STATUS_ERROR)
+        self._schedule_failure(
+            f"microphone capture failed: {type(_error).__name__}",
+            generation,
+        )
 
     def _offer_microphone_audio(self, pcm: bytes, generation: int) -> None:
         if (
@@ -258,10 +282,12 @@ class DialogController:
                 await self._client.send_audio(pcm)
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as error:
                 if generation == self._generation_id and self._accept_events:
-                    self._clear_microphone_queue()
-                    self._set_state(STATUS_ERROR)
+                    self._schedule_failure(
+                        f"microphone send failed: {error}",
+                        generation,
+                    )
                     return
 
     async def _stop_microphone_uplink(self) -> None:
@@ -274,7 +300,8 @@ class DialogController:
                 stop_error = error
         sender = self._microphone_sender_task
         self._microphone_sender_task = None
-        if sender is not None:
+        current = asyncio.current_task()
+        if sender is not None and sender is not current:
             sender.cancel()
             await asyncio.gather(sender, return_exceptions=True)
         self._clear_microphone_queue()
@@ -295,49 +322,64 @@ class DialogController:
             )
 
     async def stop_session(self) -> ControllerResult:
-        async with self._command_lock:
-            self._accept_events = False
-            self._advance_generation()
-            self._audio_output.flush()
-            errors: list[str] = []
-            try:
-                await self._stop_microphone_uplink()
-            except Exception as error:
-                errors.append(f"microphone stop failed: {error}")
-            try:
-                await self._client.cancel_current_response()
-            except Exception as error:
-                errors.append(f"cancel failed: {error}")
-            try:
-                await self._client.close()
-            except Exception as error:
-                errors.append(f"close failed: {error}")
-            if errors:
-                self._set_state(STATUS_ERROR)
-                return ControllerResult(False, f"session stop failed: {'; '.join(errors)}")
-            self._set_state(STATUS_IDLE)
-            return ControllerResult(True, "session stopped")
+        return await self._run_command(self._stop_session_owned)
+
+    async def _stop_session_owned(self) -> ControllerResult:
+        self._accept_events = False
+        self._advance_generation()
+        self._audio_output.flush()
+        errors: list[str] = []
+        try:
+            await self._stop_microphone_uplink()
+        except Exception as error:
+            errors.append(f"microphone stop failed: {error}")
+        try:
+            await self._client.cancel_current_response()
+        except Exception as error:
+            errors.append(f"cancel failed: {error}")
+        try:
+            await self._client.close()
+        except Exception as error:
+            errors.append(f"close failed: {error}")
+        if errors:
+            self._set_state(STATUS_ERROR)
+            return ControllerResult(False, f"session stop failed: {'; '.join(errors)}")
+        self._set_state(STATUS_IDLE)
+        return ControllerResult(True, "session stopped")
 
     async def handle_text_input(self, text: str) -> ControllerResult:
         value = text.strip()
         if not value:
             return ControllerResult(False, "text input is empty")
-        async with self._command_lock:
-            if self._state in {STATUS_IDLE, STATUS_ERROR}:
-                started = await self._start_session(start_microphone=False)
-                if not started.success:
-                    return started
-            else:
-                self._advance_generation()
-                self._audio_output.flush()
-                await self._restart_microphone_sender()
-                await self._client.cancel_current_response()
+        return await self._run_command(
+            lambda: self._handle_text_input_owned(value)
+        )
+
+    async def _handle_text_input_owned(self, value: str) -> ControllerResult:
+        if self._state in {STATUS_IDLE, STATUS_ERROR}:
+            started = await self._start_session(start_microphone=False)
+            if not started.success:
+                return started
+        else:
+            self._advance_generation()
+            self._audio_output.flush()
+            await self._restart_microphone_sender()
             try:
-                await self._client.send_text(value)
+                await self._client.cancel_current_response()
             except Exception as error:
-                self._set_state(STATUS_ERROR)
-                return ControllerResult(False, f"text input failed: {error}")
-            return ControllerResult(True, "text input accepted")
+                message = f"text replacement cancel failed: {error}"
+                await self._fail_active_session_owned(
+                    message,
+                    self._generation_id,
+                )
+                return ControllerResult(False, message)
+        try:
+            await self._client.send_text(value)
+        except Exception as error:
+            message = f"text input failed: {error}"
+            await self._fail_active_session_owned(message, self._generation_id)
+            return ControllerResult(False, message)
+        return ControllerResult(True, "text input accepted")
 
     async def handle_event(self, event: RealtimeEvent) -> None:
         """Drop every event that belongs to a superseded lifecycle generation."""
@@ -360,15 +402,99 @@ class DialogController:
                     event.generation_id,
                 )
             except Exception:
-                self._set_state(STATUS_ERROR)
+                self._schedule_failure(
+                    "audio output rejected response PCM",
+                    event.generation_id,
+                )
         elif event.kind is RealtimeEventKind.RESPONSE_DONE:
             self._set_state(STATUS_LISTENING)
         elif event.kind is RealtimeEventKind.SPEECH_STARTED:
-            if self._state == STATUS_SPEAKING_TEXT:
-                self._advance_generation()
-                self._audio_output.flush()
-                await self._restart_microphone_sender()
+            await self._handle_speech_started(event)
+        elif event.kind in {
+            RealtimeEventKind.ERROR,
+            RealtimeEventKind.TRANSPORT_CLOSED,
+        }:
+            self._schedule_failure(
+                str(event.data.get("message", "active session failed")),
+                event.generation_id,
+            )
+
+    async def _handle_speech_started(self, event: RealtimeEvent) -> None:
+        async with self._lifecycle_lock:
+            if (
+                not self._accept_events
+                or event.generation_id != self._generation_id
+                or self._state != STATUS_SPEAKING_TEXT
+            ):
+                return
+            self._advance_generation()
+            self._audio_output.flush()
+            await self._restart_microphone_sender()
+            try:
                 await self._client.cancel_current_response()
-                self._set_state(STATUS_LISTENING)
-        elif event.kind is RealtimeEventKind.ERROR:
-            self._set_state(STATUS_ERROR)
+            except Exception as error:
+                self._schedule_failure(
+                    f"interruption cancel failed: {error}",
+                    self._generation_id,
+                )
+                return
+            self._set_state(STATUS_LISTENING)
+
+    def _schedule_failure(self, message: str, generation: int) -> None:
+        if generation != self._generation_id or not self._accept_events:
+            return
+        failure_task = self._failure_task
+        if failure_task is not None and not failure_task.done():
+            return
+        task = asyncio.create_task(
+            self._run_failure_cleanup(
+                message,
+                generation,
+            ),
+            name="dialog-session-failure-cleanup",
+        )
+        self._failure_task = task
+
+        def clear(done: asyncio.Task[None]) -> None:
+            if self._failure_task is done:
+                self._failure_task = None
+
+        task.add_done_callback(clear)
+
+    async def _run_failure_cleanup(
+        self,
+        message: str,
+        generation: int,
+    ) -> None:
+        async with self._lifecycle_lock:
+            await self._fail_active_session_owned(
+                message,
+                generation,
+            )
+
+    async def _fail_active_session_owned(
+        self,
+        message: str,
+        generation: int,
+    ) -> None:
+        """Invalidate and clean the current failed lifecycle exactly once."""
+        if generation != self._generation_id:
+            return
+        if not self._accept_events:
+            return
+        self._last_error = message
+        self._accept_events = False
+        self._advance_generation()
+        self._audio_output.flush()
+        cleanup_errors: list[str] = []
+        try:
+            await self._stop_microphone_uplink()
+        except Exception as error:
+            cleanup_errors.append(f"microphone stop failed: {error}")
+        try:
+            await self._client.close()
+        except Exception as error:
+            cleanup_errors.append(f"close failed: {error}")
+        if cleanup_errors:
+            self._last_error = f"{message}; {'; '.join(cleanup_errors)}"
+        self._set_state(STATUS_ERROR)

@@ -1,7 +1,7 @@
 # CASBOT → Yandex Realtime 迁移实施计划
 
 > 版本：v1.0  
-> 状态：Phase 5 已完成；Gate 5 为 CONDITIONAL PASS；Phase 6 NOT STARTED
+> 状态：Phase 6 COMPLETE；Gate 6 PASS；Phase 7 NOT STARTED
 > 目标平台：Linux / ROS2 Humble / Python 3.10  
 > 核心原则：本地开发优先、最少 SSH、保持机器人外部 ROS2 契约不变、可快速回滚。
 
@@ -376,30 +376,32 @@ ROS2 Node
 
 **Gate 5（2026-08-13）：CONDITIONAL PASS。** Phase 5 本地机器人接口适配与生命周期修复已完成，68 项 core/mock tests 和 10 项 Phase 2 PoC regression 通过。条件仅限以下真实环境验证项：ROS2 Humble + vendor overlay 的真实 build/launch、`lingze_msgs.msg.PcmAudioFrame` 的真实 import、`PcmAudioFrame.format` 的真实 runtime 值、speaker 接受的 sample-rate/channels、speaker 是否执行 resample/mono-stereo conversion、真实 arecord device string/executable、实机 speaker/嘴型/shutdown flush 行为，以及厂家 `session_active` 精确时序。这些项继续标记为 **UNKNOWN / DEFERRED / CONDITIONAL**，已通过配置、Adapter 或 fail-fast 隔离，没有猜测硬编码。此结论不表示机器人已经接入 Yandex。
 
-### Phase 6 — 测试（NOT STARTED）
+### Phase 6 — 测试（COMPLETE）
 
 单元测试：
 
-- [ ] event parser
-- [ ] session 状态机
-- [ ] cancel / generation ID
-- [ ] 音频分片
-- [ ] PCM 转换
-- [ ] 配置校验
-- [ ] 错误映射
-- [ ] 日志脱敏
+- [x] event parser
+- [x] session 状态机
+- [x] cancel / generation ID
+- [x] 音频分片
+- [x] PCM 转换
+- [x] 配置校验
+- [x] 错误映射
+- [x] 日志脱敏
 
 集成测试：
 
-- [ ] fake Yandex server
-- [ ] fake MicAdapter
-- [ ] fake audio output
-- [ ] text input
-- [ ] start/stop
-- [ ] interruption
-- [ ] timeout
-- [ ] disconnect/reconnect
-- [ ] stale event suppression
+- [x] fake Yandex server（真实 localhost aiohttp WebSocket）
+- [x] fake MicAdapter
+- [x] fake audio output
+- [x] text input
+- [x] start/stop
+- [x] interruption
+- [x] timeout
+- [x] disconnect / explicit reconnect
+- [x] stale event suppression
+
+**Gate 6（2026-08-14）：PASS。** 本地系统测试实际经过 aiohttp loopback TCP/WebSocket handshake 和 JSON 收发；103 项 core/integration tests 与 10 项 Phase 2 PoC regression 通过。unexpected transport/session failure 会登记单一 fatal cleanup，并与 stop/start/text/interruption lifecycle 串行；cleanup 失效 generation、flush 本地输出、停止 microphone/sender、清空有界队列、关闭 WebSocket/receive task/ClientSession 并进入 `STATUS_ERROR`。response-generation map 在 terminal done/close 时释放，stale connection 在 normalization 前由 token 拒绝；connector/receive/send/ws.close/session.close 的假凭据错误路径均有端到端脱敏证明。只允许由新的 start 或 text-input 命令显式恢复，不存在自动重连。生产 endpoint 校验未放宽，localhost 只能通过非配置化的构造器 test connector 使用。此 PASS 仅覆盖本地软件测试，不新增 ROS2、Yandex live 或机器人运行事实；Gate 5 保留的真实环境未知项不是 Gate 6 阻塞项，继续留待后续集成验证。
 
 ### Phase 7 — 部署设计
 
@@ -557,13 +559,15 @@ Codex 每次任务必须：
 ## 10. 当前状态
 
 ```text
-Current Phase: Phase 5 — COMPLETE
+Current Phase: Phase 6 — COMPLETE
 Gate 1: CONDITIONAL PASS
 Gate 2: PASS
 Gate 3: CONDITIONAL PASS
 Gate 4: PASS
 Gate 5: CONDITIONAL PASS
-Phase 6: NOT STARTED
+Phase 6: COMPLETE
+Gate 6: PASS
+Phase 7: NOT STARTED
 Remote robot changes: NONE
 Remote SSH required now: NO
 Vendor source available: NO
@@ -572,17 +576,20 @@ Local Yandex PoC: COMPLETE
 ROS2 compatibility node: LOCAL SKELETON COMPLETE; ROS2 RUNTIME NOT RUN
 Robot runtime snapshot: PHASE 4 READ-ONLY EVIDENCE FROZEN
 Robot adaptation: PHASE 5 COMPLETE; LOCAL ADAPTER IMPLEMENTATION COMPLETE
+Systematic testing: PHASE 6 COMPLETE; GATE 6 PASS
 Deployment: NOT STARTED
 ```
 
 ### 当前阶段边界
 
 ```text
-Phase 6 — NOT STARTED
+Phase 6 — COMPLETE
+Gate 6 — PASS
+Phase 7 — NOT STARTED
 ```
 
-Phase 5 已完成并以 `CONDITIONAL PASS` 通过 Gate 5。只有收到明确的
-Phase 6 任务后才开始下一阶段；本次收尾不进入 Phase 6。
+Phase 6 本地系统测试与 Gate 修复已完成并通过复审，Gate 6 正式为
+`PASS`。该结论仅覆盖已记录的本地软件证据；Phase 7 尚未开始，不得自动进入。
 
 ## 11. Decision Log
 
@@ -610,3 +617,6 @@ Phase 6 任务后才开始下一阶段；本次收尾不进入 Phase 6。
 - **D-022**：`dialog/input_waveform` 与 `system/config_update` 继续 DEFERRED；不创建收到后无行为的伪兼容接口。
 - **D-023**：systemd 部署模板与正式回滚脚本归入 Phase 7，不属于 Phase 5 本地接口适配。
 - **D-024**：Phase 5 本地机器人接口适配完成：ALSA microphone → stateful 16→24 kHz → Yandex 路径，以及 Yandex output → bounded audio queue → `PcmAudioFrame` 路径均已实现；stop/interruption/shutdown 生命周期问题已修复，68 项 core/mock tests 与 10 项 Phase 2 PoC regression 通过。Gate 5 为 `CONDITIONAL PASS`；ROS2 Humble/vendor overlay 的真实 build/launch、真实 `lingze_msgs` import、speaker/arecord 参数与实机播放、嘴型、shutdown flush、厂家 `session_active` 精确时序仍为 UNKNOWN / DEFERRED / CONDITIONAL，且已通过配置、Adapter 或 fail-fast 隔离而未猜测硬编码。此结论不表示机器人已经接入 Yandex，Phase 6 尚未开始。
+- **D-025**：Phase 6 使用构造器专用 connector 将严格校验后的官方 URL 映射到本地动态端口，以真实 aiohttp WebSocket 测试 Controller、production client、事件 normalization 和有界 output。setup timeout/error/malformed、runtime error/invalid audio/disconnect/send fault、stop-after-dead、interruption/stale event、显式 start/text recovery 与 5 次生命周期均已覆盖；由此集中实现当前 generation 的 fatal cleanup，并以 connection token 拒绝旧连接回调。没有自动重连、真实 Yandex/ROS2/机器人操作；该轮形成 Gate 6 初始复审证据，最终结论见 D-027。
+- **D-026**：Phase 6 Gate repair 统一以 lifecycle lock 串行 fatal cleanup、stop/start/text 与 interruption；fatal task 只登记一次，后续命令等待其完成，旧 generation callback 不能污染新 session。response-generation mapping 在 terminal done 后释放并在 close 时清空，stale connection token 在 normalization 前拒绝。Fake Yandex server 即使单个 WebSocket close 失败也继续关闭其余连接并 guaranteed runner cleanup。connector/receive/send/ws.close/session.close 五条假凭据故障路径连同异常链均已证明脱敏。103 项 core/integration tests 与 10 项 Phase 2 PoC regression 通过；该轮形成 Gate repair 复审证据，正式 Gate 状态见 D-027。
+- **D-027**：Phase 6 本地系统测试与 Gate 修复经复审完成，Gate 6 正式为 `PASS`，Phase 7 为 `NOT STARTED`。真实 localhost aiohttp TCP/WebSocket 覆盖 production client、Controller、JSON 收发与事件 normalization；fake microphone、有界 audio output、正常语音/文本、故障与显式恢复、lifecycle races、1,000-response map 释放、五次资源生命周期和五条异常链凭据脱敏路径均已验证。最终证据为 103/103 普通 core/integration tests、103/103 `ResourceWarning` strict tests、10/10 Phase 2 PoC regression、6 个确定性 race tests 连续 20 轮、1,000-response 场景、5-cycle 资源场景、compileall 与 `git diff --check` 全部通过。生产 endpoint/schema 未放宽，不存在自动重连；未执行真实 Yandex、ROS2、SSH、机器人或部署操作。Gate 5 保留的 ROS2/vendor overlay、真实 `lingze_msgs` import、`PcmAudioFrame.format`、speaker/arecord 参数和实机行为继续为 **UNKNOWN / DEFERRED / CONDITIONAL**，均由配置、Adapter 或 fail-fast 隔离而未猜测硬编码；这些后续集成项不是 Gate 6 的本地软件阻塞项。

@@ -22,7 +22,9 @@ Phase 4 — COMPLETE
 Gate 4 — PASS
 Phase 5 — COMPLETE
 Gate 5 — CONDITIONAL PASS
-Phase 6 — NOT STARTED
+Phase 6 — COMPLETE
+Gate 6 — PASS
+Phase 7 — NOT STARTED
 ```
 
 本地 Phase 2 真人 PoC 已使用 `speech-realtime-260528` 跑通当前 WebSocket、24 kHz PCM 麦克风输入、俄语多轮回答、增量回答音频和本地扬声器输出；未使用 fallback。播放中本地停止与 truncate 曾实际成功，用户随后明确取消了“生成中 response.cancel 必须 live 验证”的本轮要求。详见 `docs/YANDEX_REALTIME_LOCAL_POC.md`。
@@ -35,7 +37,9 @@ Phase 5 已完成本地适配：`ArecordMicAdapter` 以可配置 ALSA device 捕
 
 Phase 5 Gate 修复补齐了生命周期边界：stop 在 arecord shutdown 前先 enqueue 本地 flush；capture 异常经线程安全、带 generation/capture token 的回调进入 Controller；cancel 失败仍强制 close transport；ROS spin 结束后会在销毁节点前显式 enqueue 并 drain 最终 flush。68 项 core/mock tests 和 10 项 Phase 2 PoC regression 已通过复审，Gate 5 结论为 `CONDITIONAL PASS`。
 
-Gate 5 的条件仅是后续真实环境验证：ROS2 Humble + vendor overlay 的真实 build/launch、真实 `lingze_msgs.msg.PcmAudioFrame` import、`PcmAudioFrame.format` runtime 值、speaker 接受的 sample-rate/channels 及是否执行 resample/mono-stereo conversion、真实 arecord device string/executable、实机 speaker/嘴型/shutdown flush 行为，以及厂家 `session_active` 精确时序。这些均为 **UNKNOWN / DEFERRED / CONDITIONAL**，已通过配置、Adapter 或 fail-fast 隔离，没有猜测硬编码。该实现尚未部署或运行在机器人上，Phase 6 尚未开始。详见 `docs/ROS2_COMPATIBILITY_SKELETON.md`。
+Gate 5 的条件仅是后续真实环境验证：ROS2 Humble + vendor overlay 的真实 build/launch、真实 `lingze_msgs.msg.PcmAudioFrame` import、`PcmAudioFrame.format` runtime 值、speaker 接受的 sample-rate/channels 及是否执行 resample/mono-stereo conversion、真实 arecord device string/executable、实机 speaker/嘴型/shutdown flush 行为，以及厂家 `session_active` 精确时序。这些均为 **UNKNOWN / DEFERRED / CONDITIONAL**，已通过配置、Adapter 或 fail-fast 隔离，没有猜测硬编码。该实现尚未部署或运行在机器人上。详见 `docs/ROS2_COMPATIBILITY_SKELETON.md`。
+
+Phase 6 已完成并通过 Gate 6 本地软件测试复审。测试通过构造器专用 connector 将严格校验后的官方 Yandex URL 映射到 `127.0.0.1` 临时端口，实际经过 aiohttp TCP/WebSocket handshake 和 JSON 收发；生产 endpoint 校验、生产 connector 与 session schema 均未放宽。正常语音/文本链路、统一 lifecycle 串行、stop/interruption/stale suppression、response-generation map 释放、setup/runtime 故障、异常清理、五条凭据脱敏路径、显式恢复及 5 次资源生命周期均有覆盖。103 项 core/integration tests 与 10 项 Phase 2 PoC regression 通过；没有真实 Yandex 调用、ROS2/机器人运行或自动重连。Gate 6 的 `PASS` 仅证明该本地测试范围，不表示机器人已接入 Yandex。Gate 5 保留的 ROS2/vendor overlay、真实消息 import、speaker/arecord 参数和实机行为仍为 **UNKNOWN / DEFERRED / CONDITIONAL**；它们不是 Gate 6 的本地软件阻塞项，留待后续集成环境验证。详见 `docs/PHASE6_SYSTEMATIC_TESTING.md`。
 
 ## Key documents
 
@@ -44,6 +48,7 @@ AGENTS.md
 docs/YANDEX_REALTIME_MIGRATION_PLAN.md
 docs/YANDEX_REALTIME_VERIFIED.md
 docs/YANDEX_REALTIME_LOCAL_POC.md
+docs/PHASE6_SYSTEMATIC_TESTING.md
 docs/ROS2_COMPATIBILITY_SKELETON.md
 docs/RUNTIME_SNAPSHOT.md
 docs/vendor/二开文档.md

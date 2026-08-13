@@ -1,10 +1,10 @@
 # ROS2 Compatibility Skeleton and Phase 5 Adapter Handoff
 
-> Updated: 2026-08-13
+> Updated: 2026-08-14
 > Phase 3: COMPLETE; historical Gate 3: CONDITIONAL PASS
 > Phase 4: COMPLETE; Gate 4: PASS
 > Phase 5: COMPLETE; Gate 5: CONDITIONAL PASS
-> Phase 6: NOT STARTED
+> Phase 6: COMPLETE; Gate 6: PASS; Phase 7: NOT STARTED
 > Robot deployment/runtime launch: NOT RUN
 
 ## Package and boundaries
@@ -78,6 +78,24 @@ Text replacement and `speech_started` interruption likewise advance the
 generation and enqueue local flush before awaiting remote cancel. Exact
 `conversation.item.truncate` playback progress remains a later integration
 item; Phase 5 does not invent speaker progress feedback.
+
+Phase 6 added a constructor-only WebSocket connector seam to the transport.
+The default connector still opens the strict `wss://ai.api.cloud.yandex.net/v1/realtime`
+URL built by `build_websocket_url()`. The validated URL is computed before any
+injected connector runs, and neither ROS parameters, environment variables nor
+`RuntimeConfig` can select the test connector or authorize localhost. Tests map
+that validated URL to a temporary loopback aiohttp WebSocket server while still
+using a real `ClientSession` and `ClientWebSocketResponse`.
+
+Unexpected current-connection close, server/protocol failure and uplink failure
+now share one controller cleanup path: invalidate the generation, enqueue local
+flush, stop microphone/sender, clear bounded queues, close WebSocket/receiver/
+ClientSession, then remain in `STATUS_ERROR`. A new start command or ERROR-state
+text input creates a fresh connection and generation. A connection token rejects
+late callbacks from the old receiver; there is no automatic reconnect loop.
+User commands and fatal cleanup are serialized by command/lifecycle ownership;
+a registered fatal cleanup completes before a later stop, start or text command.
+The response-generation map releases terminal responses and is cleared on close.
 
 ## Relative ROS2 contract and CASBOT profile
 
@@ -170,12 +188,23 @@ credentials remain process-environment-only through `YANDEX_API_KEY`.
 
 ## Local verification status
 
-On 2026-08-13, 68 core/mock tests covered PCM validation, continuous
+On 2026-08-13, 68 Phase 5 core/mock tests covered PCM validation, continuous
 resampling, rechunk/reset, fake arecord lifecycle, bounded microphone sender,
 generation and capture-error suppression, flush ordering/epoch suppression,
 cancel/close cleanup, final shutdown drain, message mapping, relative names,
 QoS, session-active semantics, metadata and Yandex rate split.
 All 10 Phase 2 PoC regression tests also passed. Compileall passed.
+
+On 2026-08-14, Phase 6 extended the full suite to 103 core/integration tests.
+The added tests use a real localhost aiohttp WebSocket handshake to cover
+session setup, microphone/text uplink, text/audio downlink, stop, interruption,
+late event suppression, setup timeout/error/malformed JSON, invalid audio,
+unexpected disconnect while listening/speaking/sending, bounded idempotent stop,
+explicit start/text recovery, connection-token isolation, endpoint/config
+validation, fatal/command races, bounded response mapping, exceptional test-server
+cleanup, end-to-end redaction and five complete connect/stop resource cycles. All
+103 passed with `ResourceWarning` treated as an error; all 10 Phase 2 PoC tests
+and compileall also passed. See `PHASE6_SYSTEMATIC_TESTING.md`.
 
 The current macOS environment has no `ros2`, `colcon`, `rclpy` or
 `lingze_msgs`, so a real ROS2 Humble build and wrapper launch were **NOT RUN —
@@ -198,5 +227,10 @@ environment checks:
 These unknowns are isolated by configuration, adapters or fail-fast behavior;
 none is guessed or hardcoded. `dialog/input_waveform`, `system/config_update`
 and the final bringup/deployment switch remain separate deferred future scope,
-not additional Gate 5 conditions. The robot has not been connected to Yandex,
-and Phase 6 has not started.
+not additional Gate 5 conditions. The robot has not been connected to Yandex.
+Phase 6 is complete and Gate 6 is `PASS` for the documented local software
+scope. The Gate 5 conditions above retain their **UNKNOWN / DEFERRED /
+CONDITIONAL** status and are not Gate 6 blockers; they remain subsequent real
+environment/integration checks isolated by configuration, adapters or
+fail-fast behavior. No ROS2 or robot runtime claim was added, and Phase 7 has
+not started.

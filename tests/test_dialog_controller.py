@@ -21,12 +21,16 @@ class FakeClient:
         self.sent_audio: list[bytes] = []
         self.sent_text: list[str] = []
         self.cancel_calls = 0
+        self.first_cancel_gate: asyncio.Event | None = None
+        self.first_cancel_started = asyncio.Event()
         self.close_calls = 0
         self.send_gate: asyncio.Event | None = None
         self.send_started = asyncio.Event()
         self.send_error: Exception | None = None
         self.cancel_error: Exception | None = None
         self.close_error: Exception | None = None
+        self.close_gate: asyncio.Event | None = None
+        self.close_started = asyncio.Event()
 
     def set_event_handler(self, handler) -> None:
         self.handler = handler
@@ -44,6 +48,9 @@ class FakeClient:
     async def close(self) -> None:
         self.close_calls += 1
         self.order.append("close")
+        self.close_started.set()
+        if self.close_gate is not None:
+            await self.close_gate.wait()
         if self.close_error is not None:
             error = self.close_error
             self.close_error = None
@@ -65,6 +72,9 @@ class FakeClient:
     async def cancel_current_response(self) -> None:
         self.cancel_calls += 1
         self.order.append("cancel")
+        if self.cancel_calls == 1 and self.first_cancel_gate is not None:
+            self.first_cancel_started.set()
+            await self.first_cancel_gate.wait()
         if self.cancel_error is not None:
             error = self.cancel_error
             self.cancel_error = None
@@ -153,8 +163,39 @@ class DialogControllerTest(unittest.IsolatedAsyncioTestCase):
 
     async def asyncTearDown(self) -> None:
         self.client.send_gate = None
+        if self.client.first_cancel_gate is not None:
+            self.client.first_cancel_gate.set()
+        if self.client.close_gate is not None:
+            self.client.close_gate.set()
         if self.controller.state != STATUS_IDLE:
             await self.controller.stop_session()
+
+    async def _start_blocked_fatal_cleanup(
+        self,
+    ) -> tuple[int, asyncio.Task[None]]:
+        await self.controller.start_session()
+        generation = self.controller.generation_id
+        self.client.close_gate = asyncio.Event()
+        event_task = asyncio.create_task(
+            self.controller.handle_event(
+                RealtimeEvent(
+                    RealtimeEventKind.ERROR,
+                    generation,
+                    {"message": "scripted fatal failure"},
+                )
+            )
+        )
+        await asyncio.wait_for(self.client.close_started.wait(), timeout=1)
+        await event_task
+        self.assertTrue(event_task.done())
+        fatal_task = self.controller._failure_task
+        self.assertIsNotNone(fatal_task)
+        return generation, fatal_task
+
+    async def _event_loop_checkpoint(self) -> None:
+        checkpoint = asyncio.Event()
+        asyncio.get_running_loop().call_soon(checkpoint.set)
+        await checkpoint.wait()
 
     async def test_start_transitions_and_has_exactly_one_sender_task(self) -> None:
         first = await self.controller.start_session()
@@ -208,13 +249,142 @@ class DialogControllerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.controller.state, STATUS_IDLE)
         self.assertNotIn(STATUS_ERROR, self.statuses)
 
+    async def test_fatal_cleanup_then_concurrent_stop_finishes_idle_once_serialized(self) -> None:
+        generation, fatal_task = await self._start_blocked_fatal_cleanup()
+        stop_task = asyncio.create_task(self.controller.stop_session())
+        await self._event_loop_checkpoint()
+
+        self.assertFalse(stop_task.done())
+        self.assertEqual(self.client.close_calls, 1)
+        self.assertEqual(self.audio.flush_count, 1)
+        self.assertEqual(self.controller.generation_id, generation + 1)
+
+        self.client.close_gate.set()
+        await asyncio.wait_for(fatal_task, timeout=1)
+        result = await asyncio.wait_for(stop_task, timeout=1)
+        self.assertTrue(result.success)
+        self.assertEqual(self.controller.state, STATUS_IDLE)
+        self.assertEqual(self.client.close_calls, 2)
+        self.assertEqual(self.audio.flush_count, 2)
+        self.assertEqual(self.controller.generation_id, generation + 2)
+        self.assertFalse(self.mic.started)
+        self.assertIsNone(self.controller.microphone_sender_task)
+        self.assertEqual(self.controller.microphone_queue_size, 0)
+        await self._event_loop_checkpoint()
+        self.assertIsNone(self.controller._failure_task)
+
+    async def test_stop_claim_rejects_late_old_fatal_event(self) -> None:
+        await self.controller.start_session()
+        old_generation = self.controller.generation_id
+        self.client.close_gate = asyncio.Event()
+        stop_task = asyncio.create_task(self.controller.stop_session())
+        await asyncio.wait_for(self.client.close_started.wait(), timeout=1)
+
+        await self.controller.handle_event(
+            RealtimeEvent(
+                RealtimeEventKind.TRANSPORT_CLOSED,
+                old_generation,
+                {"message": "late old close"},
+            )
+        )
+        self.assertEqual(self.client.close_calls, 1)
+        self.assertEqual(self.audio.flush_count, 1)
+        self.assertNotIn(STATUS_ERROR, self.statuses)
+
+        self.client.close_gate.set()
+        result = await asyncio.wait_for(stop_task, timeout=1)
+        self.assertTrue(result.success)
+        self.assertEqual(self.controller.state, STATUS_IDLE)
+        self.assertNotIn(STATUS_ERROR, self.statuses)
+
+    async def test_start_waits_for_fatal_cleanup_then_creates_new_lifecycle(self) -> None:
+        old_generation, fatal_task = await self._start_blocked_fatal_cleanup()
+        start_task = asyncio.create_task(self.controller.start_session())
+        await self._event_loop_checkpoint()
+        self.assertFalse(start_task.done())
+        self.assertEqual(self.client.connect_calls, 1)
+
+        self.client.close_gate.set()
+        await asyncio.wait_for(fatal_task, timeout=1)
+        result = await asyncio.wait_for(start_task, timeout=1)
+        self.assertTrue(result.success)
+        self.assertEqual(self.client.connect_calls, 2)
+        self.assertGreater(self.controller.generation_id, old_generation)
+        self.assertEqual(self.controller.state, STATUS_LISTENING)
+        self.assertTrue(self.mic.started)
+        self.assertIsNotNone(self.controller.microphone_sender_task)
+
+    async def test_text_waits_for_fatal_cleanup_then_starts_text_only_lifecycle(self) -> None:
+        _generation, fatal_task = await self._start_blocked_fatal_cleanup()
+        text_task = asyncio.create_task(self.controller.handle_text_input("Восстановись"))
+        await self._event_loop_checkpoint()
+        self.assertFalse(text_task.done())
+        self.assertEqual(self.client.connect_calls, 1)
+
+        self.client.close_gate.set()
+        await asyncio.wait_for(fatal_task, timeout=1)
+        result = await asyncio.wait_for(text_task, timeout=1)
+        self.assertTrue(result.success)
+        self.assertEqual(self.client.connect_calls, 2)
+        self.assertEqual(self.client.sent_text, ["Восстановись"])
+        self.assertEqual(self.controller.state, STATUS_LISTENING)
+        self.assertFalse(self.mic.started)
+        self.assertIsNone(self.controller.microphone_sender_task)
+
+    async def test_multiple_fatal_sources_claim_one_cleanup(self) -> None:
+        generation, first_fatal = await self._start_blocked_fatal_cleanup()
+        self.assertIsNotNone(self.controller._failure_task)
+
+        await asyncio.gather(
+            self.controller.handle_event(
+                RealtimeEvent(
+                    RealtimeEventKind.TRANSPORT_CLOSED,
+                    generation,
+                    {"message": "duplicate close"},
+                )
+            ),
+            self.controller.handle_event(
+                RealtimeEvent(
+                    RealtimeEventKind.ERROR,
+                    generation,
+                    {"message": "duplicate error"},
+                )
+            ),
+        )
+        self.mic.fail(RuntimeError("duplicate microphone failure"))
+        await self._event_loop_checkpoint()
+
+        self.assertEqual(self.client.close_calls, 1)
+        self.assertEqual(self.audio.flush_count, 1)
+        self.assertEqual(self.statuses.count(STATUS_ERROR), 0)
+
+        self.client.close_gate.set()
+        await asyncio.wait_for(first_fatal, timeout=1)
+        await self.controller._await_failure_cleanup()
+        self.assertEqual(self.client.close_calls, 1)
+        self.assertEqual(self.audio.flush_count, 1)
+        self.assertEqual(self.statuses.count(STATUS_ERROR), 1)
+        self.assertEqual(self.controller.state, STATUS_ERROR)
+        self.assertIsNone(self.controller.microphone_sender_task)
+        await self._event_loop_checkpoint()
+        self.assertIsNone(self.controller._failure_task)
+        pending_lifecycle_tasks = [
+            task.get_name()
+            for task in asyncio.all_tasks()
+            if task is not asyncio.current_task()
+            and not task.done()
+            and (
+                task.get_name() == "dialog-session-failure-cleanup"
+                or task.get_name().startswith("yandex-")
+            )
+        ]
+        self.assertEqual(pending_lifecycle_tasks, [])
+
     async def test_current_microphone_runtime_error_enters_error(self) -> None:
         await self.controller.start_session()
         self.mic.fail(RuntimeError("arecord exited"))
-        for _ in range(10):
-            await asyncio.sleep(0)
-            if not self.mic.started:
-                break
+        await self._event_loop_checkpoint()
+        await self.controller._await_failure_cleanup()
         self.assertEqual(self.controller.state, STATUS_ERROR)
         self.assertFalse(self.mic.started)
         self.assertIsNone(self.controller.microphone_sender_task)
@@ -223,7 +393,7 @@ class DialogControllerTest(unittest.IsolatedAsyncioTestCase):
         await self.controller.start_session()
         starts_before_failure = len(self.mic.error_callbacks)
         self.mic.fail(RuntimeError("arecord exited"))
-        await asyncio.sleep(0)
+        await self._event_loop_checkpoint()
         restarted = await self.controller.start_session()
         self.assertTrue(restarted.success)
         self.assertTrue(self.mic.started)
@@ -235,7 +405,7 @@ class DialogControllerTest(unittest.IsolatedAsyncioTestCase):
         await self.controller.stop_session()
         restarted = await self.controller.start_session()
         old_error_callback(RuntimeError("old arecord failure"))
-        await asyncio.sleep(0)
+        await self._event_loop_checkpoint()
         self.assertTrue(restarted.success)
         self.assertNotEqual(self.controller.state, STATUS_ERROR)
 
@@ -311,6 +481,42 @@ class DialogControllerTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(self.order.index("flush"), self.order.index("cancel"))
         self.assertEqual(self.controller.generation_id, generation + 1)
         self.assertEqual(self.controller.state, STATUS_LISTENING)
+
+    async def test_speech_started_lifecycle_is_serialized_before_stop(self) -> None:
+        await self.controller.start_session()
+        generation = self.controller.generation_id
+        await self.controller.handle_event(
+            RealtimeEvent(RealtimeEventKind.RESPONSE_STARTED, generation, {})
+        )
+        self.client.first_cancel_gate = asyncio.Event()
+        speech_task = asyncio.create_task(
+            self.controller.handle_event(
+                RealtimeEvent(RealtimeEventKind.SPEECH_STARTED, generation, {})
+            )
+        )
+        await asyncio.wait_for(self.client.first_cancel_started.wait(), timeout=1)
+
+        stop_task = asyncio.create_task(self.controller.stop_session())
+        checkpoint = asyncio.Event()
+
+        def advance_checkpoint(remaining: int) -> None:
+            if remaining == 0:
+                checkpoint.set()
+            else:
+                asyncio.get_running_loop().call_soon(
+                    advance_checkpoint, remaining - 1
+                )
+
+        asyncio.get_running_loop().call_soon(advance_checkpoint, 20)
+        await checkpoint.wait()
+
+        self.assertFalse(stop_task.done())
+        self.assertEqual(self.client.close_calls, 0)
+        self.client.first_cancel_gate.set()
+        await asyncio.wait_for(speech_task, timeout=1)
+        result = await asyncio.wait_for(stop_task, timeout=1)
+        self.assertTrue(result.success)
+        self.assertEqual(self.controller.state, STATUS_IDLE)
 
     async def test_text_input_ensures_text_only_session(self) -> None:
         result = await self.controller.handle_text_input("  Привет  ")

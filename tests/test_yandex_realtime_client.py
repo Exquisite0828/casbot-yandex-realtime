@@ -1,5 +1,7 @@
 import asyncio
 import base64
+import json
+from types import SimpleNamespace
 import unittest
 
 from realtime_dialog.yandex_realtime_client import (
@@ -27,6 +29,39 @@ class FakeWebSocket:
 
 
 class YandexProtocolTest(unittest.IsolatedAsyncioTestCase):
+    def test_missing_credentials_folder_and_bad_model_are_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "YANDEX_API_KEY"):
+            RuntimeConfig.from_environment(
+                {"YANDEX_FOLDER_ID": "folder-1"}
+            )
+        with self.assertRaisesRegex(ValueError, "YANDEX_FOLDER_ID"):
+            RuntimeConfig.from_environment(
+                {
+                    "YANDEX_API_KEY": "test-only",
+                    "YANDEX_MODEL_OR_AGENT": PRIMARY_MODEL,
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "model"):
+            resolve_model_uri("https://bad-model.example", "folder-1")
+
+    def test_runtime_config_rejects_missing_key_model_and_invalid_rates(self) -> None:
+        valid = {
+            "api_key": "test-only",
+            "model_uri": "gpt://folder-1/speech-realtime-260528",
+        }
+        for overrides, message in (
+            ({"api_key": ""}, "api_key"),
+            ({"model_uri": ""}, "model_uri"),
+            ({"input_sample_rate": 0}, "input_sample_rate"),
+            ({"yandex_output_sample_rate": -1}, "yandex_output_sample_rate"),
+            ({"connect_timeout": 0}, "connect_timeout"),
+            ({"setup_timeout": 0}, "setup_timeout"),
+        ):
+            values = {**valid, **overrides}
+            with self.subTest(overrides=overrides):
+                with self.assertRaisesRegex(ValueError, message):
+                    RuntimeConfig(**values)
+
     def test_runtime_config_reads_secret_from_supplied_environment_only(self) -> None:
         config = RuntimeConfig.from_environment(
             {
@@ -92,6 +127,81 @@ class YandexProtocolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(started.generation_id, 3)
         self.assertEqual(late.generation_id, 3)
         self.assertEqual(late.kind, RealtimeEventKind.ASSISTANT_TEXT)
+
+    def test_completed_responses_do_not_grow_generation_map(self) -> None:
+        generations: dict[str, int] = {}
+        for index in range(1_000):
+            response_id = f"response-{index}"
+            normalize_server_event(
+                {"type": "response.created", "response": {"id": response_id}},
+                current_generation=3,
+                response_generations=generations,
+                output_sample_rate=24_000,
+                secrets=(),
+            )
+            done = normalize_server_event(
+                {
+                    "type": "response.done",
+                    "response": {"id": response_id, "status": "completed"},
+                },
+                current_generation=4,
+                response_generations=generations,
+                output_sample_rate=24_000,
+                secrets=(),
+            )
+            self.assertEqual(done.generation_id, 3)
+        self.assertEqual(generations, {})
+
+    async def test_close_clears_response_generation_map(self) -> None:
+        client = YandexRealtimeClient(
+            RuntimeConfig(
+                api_key="test-only",
+                model_uri="gpt://folder-1/speech-realtime-260528",
+            )
+        )
+        client._response_generations["completed"] = 7
+        await client.close()
+        self.assertEqual(client._response_generations, {})
+
+    async def test_stale_connection_frame_is_rejected_before_normalization(self) -> None:
+        import aiohttp
+
+        class StaleWebSocket:
+            close_code = 1000
+
+            def __init__(self) -> None:
+                self._messages = iter(
+                    [
+                        SimpleNamespace(
+                            type=aiohttp.WSMsgType.TEXT,
+                            data=json.dumps(
+                                {
+                                    "type": "response.created",
+                                    "response": {"id": "stale-response"},
+                                }
+                            ),
+                        )
+                    ]
+                )
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                try:
+                    return next(self._messages)
+                except StopIteration:
+                    raise StopAsyncIteration
+
+        client = YandexRealtimeClient(
+            RuntimeConfig(
+                api_key="test-only",
+                model_uri="gpt://folder-1/speech-realtime-260528",
+            )
+        )
+        client._connection_token = 2
+        await client._receive_loop(StaleWebSocket(), connection_token=1)
+        self.assertEqual(client._response_generations, {})
 
     def test_audio_event_is_decoded_without_audio_device_dependency(self) -> None:
         pcm = b"\x01\x02\x03\x04"

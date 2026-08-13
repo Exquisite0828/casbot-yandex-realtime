@@ -183,6 +183,18 @@ class RuntimeConfig:
     connect_timeout: float = 15.0
     setup_timeout: float = 10.0
 
+    def __post_init__(self) -> None:
+        if not self.api_key:
+            raise ValueError("api_key must not be empty")
+        if not self.model_uri:
+            raise ValueError("model_uri must not be empty")
+        for name in ("input_sample_rate", "yandex_output_sample_rate"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be greater than zero")
+        for name in ("connect_timeout", "setup_timeout"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be greater than zero")
+
     @classmethod
     def from_environment(
         cls, environ: Mapping[str, str] | None = None, **overrides: Any
@@ -222,6 +234,7 @@ class RealtimeEventKind(str, Enum):
     ASSISTANT_AUDIO = "assistant_audio"
     RESPONSE_DONE = "response_done"
     ERROR = "error"
+    TRANSPORT_CLOSED = "transport_closed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,11 +327,14 @@ def normalize_server_event(
     if event_type == "response.done":
         response = message.get("response")
         status = response.get("status") if isinstance(response, Mapping) else None
-        return RealtimeEvent(
+        event = RealtimeEvent(
             RealtimeEventKind.RESPONSE_DONE,
             generation,
             {"response_id": response_id, "status": status},
         )
+        if response_id:
+            response_generations.pop(response_id, None)
+        return event
     if event_type == "error":
         error = message.get("error")
         if not isinstance(error, Mapping):
@@ -338,13 +354,38 @@ def normalize_server_event(
 
 
 EventHandler = Callable[[RealtimeEvent], Awaitable[None] | None]
+WebSocketConnector = Callable[
+    [Any, str, Mapping[str, str]],
+    Awaitable[Any],
+]
+
+
+async def _connect_production_websocket(
+    session: Any,
+    validated_url: str,
+    headers: Mapping[str, str],
+) -> Any:
+    """Open the already-validated production URL with aiohttp."""
+    return await session.ws_connect(
+        validated_url,
+        headers=headers,
+        autoclose=True,
+    )
 
 
 class YandexRealtimeClient:
     """One-session asynchronous transport; caller owns reconnection policy."""
 
-    def __init__(self, config: RuntimeConfig) -> None:
+    def __init__(
+        self,
+        config: RuntimeConfig,
+        *,
+        websocket_connector: WebSocketConnector | None = None,
+    ) -> None:
         self.config = config
+        self._websocket_connector = (
+            websocket_connector or _connect_production_websocket
+        )
         self._generation_id = 0
         self._response_generations: dict[str, int] = {}
         self._current_response_id: str | None = None
@@ -353,7 +394,9 @@ class YandexRealtimeClient:
         self._ws: Any = None
         self._send_lock = asyncio.Lock()
         self._receive_task: asyncio.Task[None] | None = None
-        self._session_ready = asyncio.Event()
+        self._setup_result: asyncio.Future[None] | None = None
+        self._connection_token = 0
+        self._closing_requested = False
 
     def set_event_handler(self, handler: EventHandler) -> None:
         self._event_handler = handler
@@ -362,26 +405,36 @@ class YandexRealtimeClient:
         self._generation_id = generation_id
 
     async def connect(self, generation_id: int) -> None:
+        validated_url = build_websocket_url(
+            self.config.endpoint,
+            self.config.model_uri,
+        )
         if self._ws is not None and not getattr(self._ws, "closed", False):
             self.set_generation(generation_id)
             return
         import aiohttp
 
+        self._connection_token += 1
+        connection_token = self._connection_token
+        self._closing_requested = False
         self.set_generation(generation_id)
         self._response_generations.clear()
         self._current_response_id = None
-        self._session_ready.clear()
+        self._setup_result = asyncio.get_running_loop().create_future()
         timeout = aiohttp.ClientTimeout(
             total=None, sock_connect=self.config.connect_timeout
         )
         self._client_session = aiohttp.ClientSession(timeout=timeout)
         try:
-            self._ws = await self._client_session.ws_connect(
-                build_websocket_url(self.config.endpoint, self.config.model_uri),
-                headers={"Authorization": f"Api-Key {self.config.api_key}"},
-                autoclose=True,
+            self._ws = await self._websocket_connector(
+                self._client_session,
+                validated_url,
+                {"Authorization": f"Api-Key {self.config.api_key}"},
             )
-            self._receive_task = asyncio.create_task(self._receive_loop())
+            self._receive_task = asyncio.create_task(
+                self._receive_loop(self._ws, connection_token),
+                name=f"yandex-realtime-receiver-{connection_token}",
+            )
             await self._send(
                 build_session_update(
                     input_sample_rate=self.config.input_sample_rate,
@@ -393,19 +446,50 @@ class YandexRealtimeClient:
                 )
             )
             await asyncio.wait_for(
-                self._session_ready.wait(), timeout=self.config.setup_timeout
+                self._setup_result, timeout=self.config.setup_timeout
             )
-        except BaseException:
-            await self.close()
-            raise
+        except BaseException as error:
+            if isinstance(error, asyncio.TimeoutError):
+                failure: BaseException = RuntimeError(
+                    "Yandex Realtime session setup timed out"
+                )
+            elif isinstance(error, asyncio.CancelledError):
+                failure = error
+            else:
+                failure = RuntimeError(
+                    redact_text(
+                        str(error) or type(error).__name__,
+                        secrets=(self.config.api_key,),
+                    )
+                )
+            try:
+                await self.close()
+            except BaseException as cleanup_error:
+                if isinstance(failure, asyncio.CancelledError):
+                    raise failure
+                safe_cleanup = redact_text(
+                    str(cleanup_error) or type(cleanup_error).__name__,
+                    secrets=(self.config.api_key,),
+                )
+                raise RuntimeError(
+                    f"{failure}; cleanup failed: {safe_cleanup}"
+                ) from None
+            raise failure from None
 
     async def close(self) -> None:
+        self._closing_requested = True
+        self._connection_token += 1
+        setup_result = self._setup_result
+        self._setup_result = None
+        if setup_result is not None and not setup_result.done():
+            setup_result.cancel()
         receive_task = self._receive_task
         self._receive_task = None
         ws = self._ws
         self._ws = None
         session = self._client_session
         self._client_session = None
+        self._response_generations.clear()
         errors: list[BaseException] = []
         try:
             if ws is not None and not getattr(ws, "closed", False):
@@ -426,7 +510,11 @@ class YandexRealtimeClient:
             errors.append(error)
         self._current_response_id = None
         if errors:
-            raise errors[0]
+            message = redact_text(
+                str(errors[0]) or type(errors[0]).__name__,
+                secrets=(self.config.api_key,),
+            )
+            raise RuntimeError(message) from None
 
     async def send_audio(self, pcm: bytes) -> None:
         if pcm:
@@ -460,12 +548,40 @@ class YandexRealtimeClient:
     async def _send(self, event: dict[str, object]) -> None:
         if self._ws is None or getattr(self._ws, "closed", False):
             raise RuntimeError("Yandex Realtime WebSocket is not connected")
-        async with self._send_lock:
-            await self._ws.send_json(event)
+        try:
+            async with self._send_lock:
+                await self._ws.send_json(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            message = redact_text(
+                str(error) or type(error).__name__,
+                secrets=(self.config.api_key,),
+            )
+            raise RuntimeError(
+                f"Yandex Realtime send failed: {message}"
+            ) from None
 
-    async def _dispatch(self, event: RealtimeEvent) -> None:
+    async def _dispatch(
+        self,
+        event: RealtimeEvent,
+        connection_token: int,
+    ) -> None:
+        if connection_token != self._connection_token:
+            return
+        setup_result = self._setup_result
         if event.kind is RealtimeEventKind.SESSION_READY:
-            self._session_ready.set()
+            if setup_result is not None and not setup_result.done():
+                setup_result.set_result(None)
+        elif event.kind in {
+            RealtimeEventKind.ERROR,
+            RealtimeEventKind.TRANSPORT_CLOSED,
+        }:
+            if setup_result is not None and not setup_result.done():
+                setup_result.set_exception(
+                    RuntimeError(str(event.data.get("message", "session setup failed")))
+                )
+                return
         if event.kind is RealtimeEventKind.RESPONSE_STARTED:
             self._current_response_id = event.data.get("response_id")
         elif event.kind is RealtimeEventKind.RESPONSE_DONE:
@@ -476,24 +592,28 @@ class YandexRealtimeClient:
             if inspect.isawaitable(result):
                 await result
 
-    async def _receive_loop(self) -> None:
+    async def _receive_loop(self, ws: Any, connection_token: int) -> None:
         import aiohttp
 
-        ws = self._ws
+        fatal_dispatched = False
         try:
             async for message in ws:
+                if connection_token != self._connection_token:
+                    return
                 if message.type == aiohttp.WSMsgType.TEXT:
                     try:
                         payload = json.loads(message.data)
                     except json.JSONDecodeError:
+                        fatal_dispatched = True
                         await self._dispatch(
                             RealtimeEvent(
                                 RealtimeEventKind.ERROR,
                                 self._generation_id,
                                 {"message": "received a non-JSON text event"},
-                            )
+                            ),
+                            connection_token,
                         )
-                        continue
+                        return
                     event = normalize_server_event(
                         payload,
                         current_generation=self._generation_id,
@@ -502,7 +622,11 @@ class YandexRealtimeClient:
                         secrets=(self.config.api_key,),
                     )
                     if event is not None:
-                        await self._dispatch(event)
+                        if event.kind is RealtimeEventKind.ERROR:
+                            fatal_dispatched = True
+                        await self._dispatch(event, connection_token)
+                        if fatal_dispatched:
+                            return
                 elif message.type in {
                     aiohttp.WSMsgType.CLOSE,
                     aiohttp.WSMsgType.CLOSED,
@@ -512,6 +636,7 @@ class YandexRealtimeClient:
         except asyncio.CancelledError:
             raise
         except Exception as error:
+            fatal_dispatched = True
             await self._dispatch(
                 RealtimeEvent(
                     RealtimeEventKind.ERROR,
@@ -522,5 +647,26 @@ class YandexRealtimeClient:
                             secrets=(self.config.api_key,),
                         )
                     },
-                )
+                ),
+                connection_token,
             )
+        finally:
+            if (
+                not fatal_dispatched
+                and connection_token == self._connection_token
+                and not self._closing_requested
+            ):
+                close_code = getattr(ws, "close_code", None)
+                await self._dispatch(
+                    RealtimeEvent(
+                        RealtimeEventKind.TRANSPORT_CLOSED,
+                        self._generation_id,
+                        {
+                            "message": (
+                                "transport closed unexpectedly"
+                                + (f"; close_code={close_code}" if close_code is not None else "")
+                            )
+                        },
+                    ),
+                    connection_token,
+                )
