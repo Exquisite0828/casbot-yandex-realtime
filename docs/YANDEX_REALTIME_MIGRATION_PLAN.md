@@ -1,7 +1,7 @@
 # CASBOT → Yandex Realtime 迁移实施计划
 
 > 版本：v1.0  
-> 状态：Phase 4 已完成；Gate 4 为 PASS；Phase 5 未开始
+> 状态：Phase 5 已完成；Gate 5 为 CONDITIONAL PASS；Phase 6 NOT STARTED
 > 目标平台：Linux / ROS2 Humble / Python 3.10  
 > 核心原则：本地开发优先、最少 SSH、保持机器人外部 ROS2 契约不变、可快速回滚。
 
@@ -193,12 +193,12 @@ Yandex Realtime API 在 2026 年发生过协议格式与 endpoint 调整，因�
 | 麦克风入口 | VERIFIED | `dialog_node` 直接持有 ALSA `/dev/snd/pcmC0D0c`；未观察到 ROS2 mic 输入订阅 |
 | 麦克风 PCM | VERIFIED | MMAP_INTERLEAVED、S16_LE、mono、16 kHz、period 1024、buffer 16384 |
 | `PcmAudioFrame` 字段 | VERIFIED | `stamp`、`sample_rate`、`channels`、`format`、`data` |
-| `PcmAudioFrame.format` 实际值 | DEFERRED | Phase 5 必须从兼容行为确定，禁止猜字符串 |
+| `PcmAudioFrame.format` 实际值 | DEFERRED / CONDITIONAL | 留待真实 vendor runtime 验证，禁止猜字符串 |
 | dialog play/flush/status/text QoS | VERIFIED | Reliability/Durability 已冻结；CLI 的 history depth 为 UNKNOWN，精确值 NOT COLLECTED |
 | 实际节点 / namespace | VERIFIED | `/lzdl10823/dialog_node`，namespace `/lzdl10823` |
 | systemd / launch 入口 | VERIFIED | `lingze_robot.service → /lingze/bin/start_robot.sh`；进程树观察到 `ros2 launch bringup bringup.launch.py` |
 | ROS2 视觉输入 | NOT OBSERVED | `dialog_node` 无 camera/image subscriber；不证明闭源进程未通过非 ROS2 路径访问摄像头 |
-| speaker 输入转换 / 重采样 | NOT OBSERVED / DEFERRED | 播放硬件为 48 kHz stereo 不证明发布端格式；Phase 5 解决 |
+| speaker 输入转换 / 重采样 | NOT OBSERVED / DEFERRED / CONDITIONAL | 播放硬件为 48 kHz stereo 不证明发布端格式；留待后续实机验证 |
 | 当前云端模型准确 ID | NOT COLLECTED | `lingze_omni_s2s` 仅是运行时包名；Qwen 具体型号仍是工作假设 |
 | 当前 system prompt / persona | NOT COLLECTED / DEFERRED | 可获得则采集，否则重新定义并在验收中确认 |
 | 原系统真人黑盒体验基线 | NOT COLLECTED / DEFERRED | 用户决定推迟到集成/验收，不阻塞 Gate 4 |
@@ -357,20 +357,26 @@ ROS2 Node
 
 ### Phase 5 — 机器人适配
 
-- [ ] MicAdapter 接实际麦克风。
-- [ ] 需要时 resample。
-- [ ] Yandex 输出转实际 `PcmAudioFrame`。
-- [ ] 对齐 QoS。
-- [ ] 对齐状态序列。
-- [ ] 对齐 stop / flush。
-- [ ] 对齐 namespace。
-- [ ] 确认 package / executable / launch 最终名称。
-- [ ] systemd 部署模板。
-- [ ] 回滚脚本。
+- [x] 实现可配置 `ArecordMicAdapter` 生产路径；实际机器人 device string / executable 仍待集成验证。
+- [x] 实现无第三方依赖的状态化 16 kHz → 24 kHz PCM16 mono 重采样与 20 ms 分片。
+- [x] microphone uplink 改为有界 drop-oldest queue + 单一异步 sender。
+- [x] Yandex input/output sample rate 拆分，默认均为 24 kHz。
+- [x] 实现带 generation/playback epoch 的有界机器人输出队列和真实 `PcmAudioFrame` factory。
+- [x] `speaker_pcm_format` 保持 required 空默认；未猜测真实字符串。
+- [x] 对齐已验证 Reliability/Durability；history depth 明确为项目 buffer policy。
+- [x] 实现 `session_active` 项目兼容语义；未冒充厂家精确时序。
+- [x] stop / text replacement / speech_started 均先本地 flush，再等待网络 cancel/close。
+- [x] stop 的 flush enqueue 位于 arecord shutdown 前；cancel 失败仍 mandatory close，错误结果保持可观察。
+- [x] arecord runtime error 通过线程安全、generation/capture-token guard 进入 Controller；主动 stop 与 stale callback 不误报。
+- [x] ROS shutdown 在 destroy 前显式 enqueue/drain 最终 flush；flush 作为跨 generation barrier 保留。
+- [x] ROS 名称相对化；新增可覆盖 namespace/node name 的 CASBOT launch profile。
+- [x] 声明 `lingze_msgs` 正式依赖并安装 launch/config 示例。
+- [ ] 在 ROS2 Humble + vendor overlay 环境 build/launch（本地环境缺失，未运行）。
+- [ ] 实机确认 `PcmAudioFrame.format`、speaker acceptance、arecord device 与真实播放/嘴型。
 
-**Gate 5：** 所有机器人差异均已参数化，无猜测硬编码。
+**Gate 5（2026-08-13）：CONDITIONAL PASS。** Phase 5 本地机器人接口适配与生命周期修复已完成，68 项 core/mock tests 和 10 项 Phase 2 PoC regression 通过。条件仅限以下真实环境验证项：ROS2 Humble + vendor overlay 的真实 build/launch、`lingze_msgs.msg.PcmAudioFrame` 的真实 import、`PcmAudioFrame.format` 的真实 runtime 值、speaker 接受的 sample-rate/channels、speaker 是否执行 resample/mono-stereo conversion、真实 arecord device string/executable、实机 speaker/嘴型/shutdown flush 行为，以及厂家 `session_active` 精确时序。这些项继续标记为 **UNKNOWN / DEFERRED / CONDITIONAL**，已通过配置、Adapter 或 fail-fast 隔离，没有猜测硬编码。此结论不表示机器人已经接入 Yandex。
 
-### Phase 6 — 测试
+### Phase 6 — 测试（NOT STARTED）
 
 单元测试：
 
@@ -396,6 +402,9 @@ ROS2 Node
 - [ ] stale event suppression
 
 ### Phase 7 — 部署设计
+
+本 Phase 才负责 systemd 部署模板和正式回滚脚本；它们不属于 Phase 5
+本地机器人接口适配交付。
 
 第一版不得删除或覆盖厂家原节点。
 
@@ -548,11 +557,13 @@ Codex 每次任务必须：
 ## 10. 当前状态
 
 ```text
-Current Phase: Phase 4 — COMPLETE
+Current Phase: Phase 5 — COMPLETE
 Gate 1: CONDITIONAL PASS
 Gate 2: PASS
 Gate 3: CONDITIONAL PASS
 Gate 4: PASS
+Gate 5: CONDITIONAL PASS
+Phase 6: NOT STARTED
 Remote robot changes: NONE
 Remote SSH required now: NO
 Vendor source available: NO
@@ -560,17 +571,18 @@ Yandex production protocol verified: LOCAL ROUTE A CORE PATH VERIFIED WITH speec
 Local Yandex PoC: COMPLETE
 ROS2 compatibility node: LOCAL SKELETON COMPLETE; ROS2 RUNTIME NOT RUN
 Robot runtime snapshot: PHASE 4 READ-ONLY EVIDENCE FROZEN
-Robot adaptation: NOT STARTED
+Robot adaptation: PHASE 5 COMPLETE; LOCAL ADAPTER IMPLEMENTATION COMPLETE
 Deployment: NOT STARTED
 ```
 
-### 当前唯一允许执行的下一步
+### 当前阶段边界
 
 ```text
-Phase 5 — Robot interface adaptation
+Phase 6 — NOT STARTED
 ```
 
-Phase 5 尚未开始；必须等待 Gate 4 复审和用户明确授权。
+Phase 5 已完成并以 `CONDITIONAL PASS` 通过 Gate 5。只有收到明确的
+Phase 6 任务后才开始下一阶段；本次收尾不进入 Phase 6。
 
 ## 11. Decision Log
 
@@ -590,3 +602,11 @@ Phase 5 尚未开始；必须等待 Gate 4 复审和用户明确授权。
 - **D-014**：`PcmAudioFrame` schema 与 dialog play/dialog flush/status/text result QoS 已通过运行时证据冻结；`format` 实际值和 speaker conversion behavior 仍 DEFERRED，禁止猜测。
 - **D-015**：`/lzdl10823/dialog/session_active` 在实机由 `dialog_node` 发布且有 `face_play_example` consumer，Phase 5 纳入兼容评估。
 - **D-016**：原系统真人黑盒 baseline 经用户决定推迟到集成/验收，不作为 Gate 4 阻塞项；其余 Gate 4 核心证据齐备，因此 Gate 4 为 `PASS`，Phase 5 未开始。
+- **D-017**：机器人已验证的 16 kHz S16_LE mono 输入在 Adapter 内使用无第三方依赖、跨 chunk 连续的线性重采样转换为 Yandex 24 kHz PCM16 mono，并统一重分片为 20 ms。
+- **D-018**：Yandex 回答保持实际 24 kHz mono payload 发布，不根据 48 kHz stereo 物理硬件推断 speaker 输入契约，也不做未经验证的输出转换。
+- **D-019**：`speaker_pcm_format` 为 required runtime configuration，空值 fail-fast；没有任何猜测默认值。
+- **D-020**：核心 ROS 接口使用相对名称，CASBOT namespace 和 node name 由 launch profile 配置；`lzdl10823` 仅为可覆盖实例示例。
+- **D-021**：`dialog/session_active` 采用 IDLE/ERROR=false、CONNECTING/LISTENING/SPEAKING=true 的 PROJECT COMPATIBILITY SEMANTIC，不宣称等同厂家精确时序。
+- **D-022**：`dialog/input_waveform` 与 `system/config_update` 继续 DEFERRED；不创建收到后无行为的伪兼容接口。
+- **D-023**：systemd 部署模板与正式回滚脚本归入 Phase 7，不属于 Phase 5 本地接口适配。
+- **D-024**：Phase 5 本地机器人接口适配完成：ALSA microphone → stateful 16→24 kHz → Yandex 路径，以及 Yandex output → bounded audio queue → `PcmAudioFrame` 路径均已实现；stop/interruption/shutdown 生命周期问题已修复，68 项 core/mock tests 与 10 项 Phase 2 PoC regression 通过。Gate 5 为 `CONDITIONAL PASS`；ROS2 Humble/vendor overlay 的真实 build/launch、真实 `lingze_msgs` import、speaker/arecord 参数与实机播放、嘴型、shutdown flush、厂家 `session_active` 精确时序仍为 UNKNOWN / DEFERRED / CONDITIONAL，且已通过配置、Adapter 或 fail-fast 隔离而未猜测硬编码。此结论不表示机器人已经接入 Yandex，Phase 6 尚未开始。

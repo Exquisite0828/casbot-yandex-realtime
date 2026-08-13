@@ -41,7 +41,8 @@ class YandexProtocolTest(unittest.IsolatedAsyncioTestCase):
 
     def test_current_session_and_text_schemas_are_reused(self) -> None:
         session = build_session_update(
-            sample_rate=24_000,
+            input_sample_rate=24_000,
+            output_sample_rate=16_000,
             voice="dasha",
             vad_threshold=0.5,
             silence_ms=500,
@@ -50,6 +51,10 @@ class YandexProtocolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             session["session"]["audio"]["input"]["format"],
             {"type": "audio/pcm", "rate": 24_000},
+        )
+        self.assertEqual(
+            session["session"]["audio"]["output"]["format"],
+            {"type": "audio/pcm", "rate": 16_000},
         )
         self.assertEqual(session["session"]["audio"]["input"]["languages"], ["ru-RU"])
         text_events = build_text_input_events("Привет")
@@ -147,6 +152,45 @@ class YandexProtocolTest(unittest.IsolatedAsyncioTestCase):
             {"type": "response.cancel", "response_id": "response-9"},
         )
         self.assertEqual(websocket.sent[4]["type"], "conversation.item.truncate")
+
+    def test_runtime_config_has_independent_input_and_output_rates(self) -> None:
+        config = RuntimeConfig(
+            api_key="test-only",
+            model_uri="gpt://folder-1/speech-realtime-260528",
+            input_sample_rate=24_000,
+            yandex_output_sample_rate=16_000,
+        )
+        self.assertEqual(config.input_sample_rate, 24_000)
+        self.assertEqual(config.yandex_output_sample_rate, 16_000)
+        self.assertFalse(hasattr(config, "sample_rate"))
+
+    async def test_close_cleans_session_when_websocket_close_raises(self) -> None:
+        class FailingWebSocket:
+            closed = False
+
+            async def close(self) -> None:
+                raise RuntimeError("websocket close failed")
+
+        class Session:
+            def __init__(self) -> None:
+                self.closed = False
+
+            async def close(self) -> None:
+                self.closed = True
+
+        config = RuntimeConfig(
+            api_key="test-only",
+            model_uri="gpt://folder-1/speech-realtime-260528",
+        )
+        client = YandexRealtimeClient(config)
+        session = Session()
+        client._ws = FailingWebSocket()
+        client._client_session = session
+        with self.assertRaisesRegex(RuntimeError, "websocket close failed"):
+            await client.close()
+        self.assertTrue(session.closed)
+        self.assertIsNone(client._ws)
+        self.assertIsNone(client._client_session)
 
 
 if __name__ == "__main__":

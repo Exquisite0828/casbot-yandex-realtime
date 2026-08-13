@@ -1,0 +1,32 @@
+# Example only. The launch namespace defaults to lzdl10823 and is overridable.
+# ``hw:0,0`` is a project integration candidate, NOT a Phase 4-verified arecord
+# device string. Confirm it locally before any later robot integration run.
+/**:
+  ros__parameters:
+    mic_backend: "arecord"
+    mic_executable: "arecord"
+    mic_device: "hw:0,0"
+    mic_source_sample_rate: 16000
+    mic_channels: 1
+    mic_format: "S16_LE"
+    mic_chunk_ms: 20
+    mic_queue_chunks: 50
+
+    yandex_input_sample_rate: 24000
+    yandex_output_sample_rate: 24000
+
+    # REQUIRED. The vendor runtime value remains unknown; no default is guessed.
+    speaker_pcm_format: ""
+    speaker_sample_rate: 24000
+    speaker_channels: 1
+    speaker_queue_packets: 100
+
+    yandex_endpoint: "wss://ai.api.cloud.yandex.net/v1/realtime"
+    yandex_model: "speech-realtime-260528"
+    yandex_folder_id: ""
+    yandex_voice: "dasha"
+    yandex_vad_threshold: 0.5
+    yandex_silence_ms: 500
+    yandex_instructions: "Ты дружелюбный голосовой ассистент. Всегда отвечай на русском языке, кратко и естественно. Помни контекст текущего разговора."
+    yandex_connect_timeout: 15.0
+    yandex_setup_timeout: 10.0

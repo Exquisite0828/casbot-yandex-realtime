@@ -50,7 +50,10 @@ class DialogController:
         audio_output: AudioOutputAdapter,
         status_sink: Callable[[str], object],
         text_result_sink: Callable[[str], object],
+        microphone_queue_chunks: int = 50,
     ) -> None:
+        if microphone_queue_chunks <= 0:
+            raise ValueError("microphone_queue_chunks must be greater than zero")
         self._client = client
         self._mic = mic_adapter
         self._audio_output = audio_output
@@ -61,8 +64,15 @@ class DialogController:
         self._command_lock = asyncio.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._microphone_started = False
+        self._microphone_capture_id = 0
+        self._microphone_queue: asyncio.Queue[tuple[int, bytes]] = asyncio.Queue(
+            maxsize=microphone_queue_chunks
+        )
+        self._microphone_sender_task: asyncio.Task[None] | None = None
+        self._microphone_dropped_chunks = 0
         self._accept_events = False
         self._client.set_event_handler(self.handle_event)
+        self._audio_output.set_generation(self._generation_id)
 
     @property
     def state(self) -> str:
@@ -72,15 +82,36 @@ class DialogController:
     def generation_id(self) -> int:
         return self._generation_id
 
+    @property
+    def microphone_sender_task(self) -> asyncio.Task[None] | None:
+        return self._microphone_sender_task
+
+    @property
+    def microphone_queue_size(self) -> int:
+        return self._microphone_queue.qsize()
+
+    @property
+    def microphone_dropped_chunks(self) -> int:
+        return self._microphone_dropped_chunks
+
     def _set_state(self, state: str) -> None:
         if state == self._state:
             return
         self._state = state
         self._status_sink(state)
 
+    def _clear_microphone_queue(self) -> None:
+        while True:
+            try:
+                self._microphone_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+
     def _advance_generation(self) -> int:
         self._generation_id += 1
+        self._clear_microphone_queue()
         self._client.set_generation(self._generation_id)
+        self._audio_output.set_generation(self._generation_id)
         return self._generation_id
 
     async def start_session(self) -> ControllerResult:
@@ -89,8 +120,14 @@ class DialogController:
 
     async def _start_session(self, *, start_microphone: bool) -> ControllerResult:
         if self._state not in {STATUS_IDLE, STATUS_ERROR}:
-            if start_microphone and not self._microphone_started:
-                self._start_microphone()
+            if start_microphone:
+                try:
+                    await self._start_microphone_uplink()
+                except Exception as error:
+                    self._set_state(STATUS_ERROR)
+                    return ControllerResult(
+                        False, f"microphone start failed: {error}"
+                    )
             return ControllerResult(True, "session already active")
 
         self._loop = asyncio.get_running_loop()
@@ -100,54 +137,184 @@ class DialogController:
         try:
             await self._client.connect(generation)
             if start_microphone:
-                self._start_microphone()
+                await self._start_microphone_uplink()
         except Exception as error:
             self._accept_events = False
+            await self._stop_microphone_uplink()
             self._set_state(STATUS_ERROR)
             return ControllerResult(False, f"session start failed: {error}")
         return ControllerResult(True, "session started")
 
-    def _start_microphone(self) -> None:
+    async def _start_microphone_uplink(self) -> None:
+        sender = self._microphone_sender_task
+        if sender is None or sender.done():
+            self._microphone_sender_task = asyncio.create_task(
+                self._microphone_sender(), name="yandex-microphone-sender"
+            )
         if self._microphone_started:
             return
-        self._mic.start(self._on_microphone_audio)
+        self._microphone_capture_id += 1
+        capture_id = self._microphone_capture_id
         self._microphone_started = True
+        try:
+            self._mic.start(
+                self._on_microphone_audio,
+                lambda error: self._on_microphone_runtime_error(
+                    error,
+                    capture_id,
+                ),
+            )
+        except BaseException:
+            self._microphone_started = False
+            sender = self._microphone_sender_task
+            self._microphone_sender_task = None
+            if sender is not None:
+                sender.cancel()
+                await asyncio.gather(sender, return_exceptions=True)
+            raise
 
     def _on_microphone_audio(self, pcm: bytes) -> None:
-        """Bridge a potentially non-async adapter callback to the worker loop."""
+        """Bridge the arecord reader thread to one bounded async sender."""
+        loop = self._loop
+        if loop is None or loop.is_closed():
+            return
+        generation = self._generation_id
+        payload = bytes(pcm)
+        loop.call_soon_threadsafe(
+            self._offer_microphone_audio, payload, generation
+        )
+
+    def _on_microphone_runtime_error(
+        self,
+        error: Exception,
+        capture_id: int,
+    ) -> None:
+        """Bridge a capture-thread failure onto the controller event loop."""
         loop = self._loop
         if loop is None or loop.is_closed():
             return
         generation = self._generation_id
         loop.call_soon_threadsafe(
-            lambda: asyncio.create_task(
-                self._send_microphone_audio(bytes(pcm), generation)
-            )
+            self._handle_microphone_runtime_error,
+            error,
+            generation,
+            capture_id,
         )
 
-    async def _send_microphone_audio(self, pcm: bytes, generation: int) -> None:
-        if generation != self._generation_id or self._state == STATUS_IDLE:
+    def _handle_microphone_runtime_error(
+        self,
+        _error: Exception,
+        generation: int,
+        capture_id: int,
+    ) -> None:
+        if (
+            generation != self._generation_id
+            or capture_id != self._microphone_capture_id
+            or not self._microphone_started
+            or not self._accept_events
+        ):
+            return
+        self._accept_events = False
+        self._clear_microphone_queue()
+        self._microphone_started = False
+        try:
+            self._mic.stop()
+        except Exception:
+            pass
+        sender = self._microphone_sender_task
+        self._microphone_sender_task = None
+        if sender is not None:
+            sender.cancel()
+        self._set_state(STATUS_ERROR)
+
+    def _offer_microphone_audio(self, pcm: bytes, generation: int) -> None:
+        if (
+            not self._microphone_started
+            or generation != self._generation_id
+            or not self._accept_events
+            or self._state in {STATUS_IDLE, STATUS_ERROR}
+        ):
             return
         try:
-            await self._client.send_audio(pcm)
-        except Exception:
-            if generation == self._generation_id:
-                self._set_state(STATUS_ERROR)
+            self._microphone_queue.put_nowait((generation, pcm))
+        except asyncio.QueueFull:
+            try:
+                self._microphone_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            self._microphone_dropped_chunks += 1
+            self._microphone_queue.put_nowait((generation, pcm))
+
+    async def _microphone_sender(self) -> None:
+        while True:
+            generation, pcm = await self._microphone_queue.get()
+            if (
+                generation != self._generation_id
+                or not self._microphone_started
+                or not self._accept_events
+            ):
+                continue
+            try:
+                await self._client.send_audio(pcm)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                if generation == self._generation_id and self._accept_events:
+                    self._clear_microphone_queue()
+                    self._set_state(STATUS_ERROR)
+                    return
+
+    async def _stop_microphone_uplink(self) -> None:
+        stop_error: Exception | None = None
+        if self._microphone_started:
+            self._microphone_started = False
+            try:
+                self._mic.stop()
+            except Exception as error:
+                stop_error = error
+        sender = self._microphone_sender_task
+        self._microphone_sender_task = None
+        if sender is not None:
+            sender.cancel()
+            await asyncio.gather(sender, return_exceptions=True)
+        self._clear_microphone_queue()
+        if stop_error is not None:
+            raise stop_error
+
+    async def _restart_microphone_sender(self) -> None:
+        """Cancel any old-generation in-flight send, then resume capture uplink."""
+        sender = self._microphone_sender_task
+        self._microphone_sender_task = None
+        if sender is not None:
+            sender.cancel()
+            await asyncio.gather(sender, return_exceptions=True)
+        self._clear_microphone_queue()
+        if self._microphone_started and self._accept_events:
+            self._microphone_sender_task = asyncio.create_task(
+                self._microphone_sender(), name="yandex-microphone-sender"
+            )
 
     async def stop_session(self) -> ControllerResult:
         async with self._command_lock:
             self._accept_events = False
             self._advance_generation()
-            if self._microphone_started:
-                self._mic.stop()
-                self._microphone_started = False
+            self._audio_output.flush()
+            errors: list[str] = []
+            try:
+                await self._stop_microphone_uplink()
+            except Exception as error:
+                errors.append(f"microphone stop failed: {error}")
             try:
                 await self._client.cancel_current_response()
-                self._audio_output.flush()
+            except Exception as error:
+                errors.append(f"cancel failed: {error}")
+            try:
                 await self._client.close()
             except Exception as error:
+                errors.append(f"close failed: {error}")
+            if errors:
                 self._set_state(STATUS_ERROR)
-                return ControllerResult(False, f"session stop failed: {error}")
+                return ControllerResult(False, f"session stop failed: {'; '.join(errors)}")
             self._set_state(STATUS_IDLE)
             return ControllerResult(True, "session stopped")
 
@@ -163,6 +330,7 @@ class DialogController:
             else:
                 self._advance_generation()
                 self._audio_output.flush()
+                await self._restart_microphone_sender()
                 await self._client.cancel_current_response()
             try:
                 await self._client.send_text(value)
@@ -199,6 +367,7 @@ class DialogController:
             if self._state == STATUS_SPEAKING_TEXT:
                 self._advance_generation()
                 self._audio_output.flush()
+                await self._restart_microphone_sender()
                 await self._client.cancel_current_response()
                 self._set_state(STATUS_LISTENING)
         elif event.kind is RealtimeEventKind.ERROR:

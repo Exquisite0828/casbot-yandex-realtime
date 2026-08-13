@@ -45,7 +45,8 @@ class ProtocolHelpersTest(unittest.TestCase):
 
     def test_session_update_uses_2026_audio_schema_and_russian(self) -> None:
         message = build_session_update(
-            sample_rate=24_000,
+            input_sample_rate=24_000,
+            output_sample_rate=24_000,
             voice="dasha",
             vad_threshold=0.5,
             silence_ms=500,

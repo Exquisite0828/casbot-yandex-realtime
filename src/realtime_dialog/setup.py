@@ -1,3 +1,6 @@
+from glob import glob
+import os
+
 from setuptools import find_packages, setup
 
 
@@ -11,6 +14,8 @@ setup(
     data_files=[
         ("share/ament_index/resource_index/packages", ["resource/realtime_dialog"]),
         (f"share/{PACKAGE_NAME}", ["package.xml"]),
+        (os.path.join("share", PACKAGE_NAME, "launch"), glob("launch/*.launch.py")),
+        (os.path.join("share", PACKAGE_NAME, "config"), glob("config/*.yaml")),
     ],
     install_requires=["setuptools", "aiohttp>=3.8,<4"],
     zip_safe=True,

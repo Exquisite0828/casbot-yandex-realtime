@@ -64,7 +64,8 @@ def build_websocket_url(endpoint: str, model_uri: str) -> str:
 
 def build_session_update(
     *,
-    sample_rate: int,
+    input_sample_rate: int,
+    output_sample_rate: int,
     voice: str,
     vad_threshold: float,
     silence_ms: int,
@@ -78,7 +79,10 @@ def build_session_update(
             "output_modalities": ["audio"],
             "audio": {
                 "input": {
-                    "format": {"type": "audio/pcm", "rate": sample_rate},
+                    "format": {
+                        "type": "audio/pcm",
+                        "rate": input_sample_rate,
+                    },
                     "languages": ["ru-RU"],
                     "turn_detection": {
                         "type": "server_vad",
@@ -87,7 +91,10 @@ def build_session_update(
                     },
                 },
                 "output": {
-                    "format": {"type": "audio/pcm", "rate": sample_rate},
+                    "format": {
+                        "type": "audio/pcm",
+                        "rate": output_sample_rate,
+                    },
                     "voice": voice,
                 },
             },
@@ -167,7 +174,8 @@ class RuntimeConfig:
     api_key: str = field(repr=False)
     endpoint: str = CURRENT_ENDPOINT
     model_uri: str = ""
-    sample_rate: int = 24_000
+    input_sample_rate: int = 24_000
+    yandex_output_sample_rate: int = 24_000
     voice: str = "dasha"
     vad_threshold: float = 0.5
     silence_ms: int = 500
@@ -376,7 +384,8 @@ class YandexRealtimeClient:
             self._receive_task = asyncio.create_task(self._receive_loop())
             await self._send(
                 build_session_update(
-                    sample_rate=self.config.sample_rate,
+                    input_sample_rate=self.config.input_sample_rate,
+                    output_sample_rate=self.config.yandex_output_sample_rate,
                     voice=self.config.voice,
                     vad_threshold=self.config.vad_threshold,
                     silence_ms=self.config.silence_ms,
@@ -397,15 +406,27 @@ class YandexRealtimeClient:
         self._ws = None
         session = self._client_session
         self._client_session = None
-        if ws is not None and not getattr(ws, "closed", False):
-            await ws.close()
-        current = asyncio.current_task()
-        if receive_task is not None and receive_task is not current:
-            receive_task.cancel()
-            await asyncio.gather(receive_task, return_exceptions=True)
-        if session is not None and not getattr(session, "closed", False):
-            await session.close()
+        errors: list[BaseException] = []
+        try:
+            if ws is not None and not getattr(ws, "closed", False):
+                await ws.close()
+        except BaseException as error:
+            errors.append(error)
+        try:
+            current = asyncio.current_task()
+            if receive_task is not None and receive_task is not current:
+                receive_task.cancel()
+                await asyncio.gather(receive_task, return_exceptions=True)
+        except BaseException as error:
+            errors.append(error)
+        try:
+            if session is not None and not getattr(session, "closed", False):
+                await session.close()
+        except BaseException as error:
+            errors.append(error)
         self._current_response_id = None
+        if errors:
+            raise errors[0]
 
     async def send_audio(self, pcm: bytes) -> None:
         if pcm:
@@ -477,7 +498,7 @@ class YandexRealtimeClient:
                         payload,
                         current_generation=self._generation_id,
                         response_generations=self._response_generations,
-                        output_sample_rate=self.config.sample_rate,
+                        output_sample_rate=self.config.yandex_output_sample_rate,
                         secrets=(self.config.api_key,),
                     )
                     if event is not None:

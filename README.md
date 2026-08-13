@@ -20,14 +20,22 @@ Phase 3 — COMPLETE
 Gate 3 — CONDITIONAL PASS
 Phase 4 — COMPLETE
 Gate 4 — PASS
-Phase 5 — NOT STARTED
+Phase 5 — COMPLETE
+Gate 5 — CONDITIONAL PASS
+Phase 6 — NOT STARTED
 ```
 
 本地 Phase 2 真人 PoC 已使用 `speech-realtime-260528` 跑通当前 WebSocket、24 kHz PCM 麦克风输入、俄语多轮回答、增量回答音频和本地扬声器输出；未使用 fallback。播放中本地停止与 truncate 曾实际成功，用户随后明确取消了“生成中 response.cancel 必须 live 验证”的本轮要求。详见 `docs/YANDEX_REALTIME_LOCAL_POC.md`。
 
-Phase 3 已建立 ROS2 Humble / Python 3.10 `ament_python` 包 `realtime_dialog`：厂家公开 `/dialog/*` 与 `/audio/dialog_flush` 契约由薄 ROS wrapper 提供，网络请求交给独立 asyncio worker，纯 Python controller 负责状态机和 generation/stale-event suppression。机器人麦克风与 `/audio/dialog_play` 仍由 Adapter 隔离，未猜测 `PcmAudioFrame`。本机无 ROS2 Humble，core/mock 测试通过但未实际启动 ROS 节点，因此 Gate 3 为 `CONDITIONAL PASS`。详见 `docs/ROS2_COMPATIBILITY_SKELETON.md`。
+Phase 3 已建立 ROS2 Humble / Python 3.10 `ament_python` 包 `realtime_dialog`；其历史 Gate 3 仍为 `CONDITIONAL PASS`，原因是本机无 ROS2 Humble，未实际启动 wrapper。
 
-Phase 4 的只读运行时证据已冻结实际边界。**VERIFIED：**节点为 `/lzdl10823/dialog_node`，namespace 为 `/lzdl10823`；厂家节点直接通过 ALSA 以 S16_LE、mono、16 kHz 采集麦克风；`PcmAudioFrame` 字段、dialog play/flush/status QoS、`audio_speaker_node` 播放与嘴型链路，以及 `lingze_robot.service → start_robot.sh → ros2 launch bringup` 启动链均有直接证据。**NOT OBSERVED / DEFERRED：**`PcmAudioFrame.format` 实际值和 speaker 输入转换行为留给 Phase 5。机器人适配尚未开始，也未将机器人接入 Yandex。详见 `docs/RUNTIME_SNAPSHOT.md`。
+Phase 4 的只读运行时证据已冻结实际边界。**VERIFIED：**节点为 `/lzdl10823/dialog_node`，namespace 为 `/lzdl10823`；厂家节点直接通过 ALSA 以 S16_LE、mono、16 kHz 采集麦克风；`PcmAudioFrame` 字段、dialog play/flush/status QoS、`audio_speaker_node` 播放与嘴型链路，以及 `lingze_robot.service → start_robot.sh → ros2 launch bringup` 启动链均有直接证据。**NOT OBSERVED / DEFERRED：**`PcmAudioFrame.format` 实际值和 speaker 输入转换行为仍待后续实机集成验证。Phase 4 未将机器人接入 Yandex。详见 `docs/RUNTIME_SNAPSHOT.md`。
+
+Phase 5 已完成本地适配：`ArecordMicAdapter` 以可配置 ALSA device 捕获 16 kHz PCM16 mono，经过无第三方依赖的状态化 16→24 kHz 重采样和 20 ms 分片后，由有界队列中的单一异步 sender 发送；Yandex 24 kHz mono 输出进入带 generation/playback epoch 的有界队列，再由 ROS executor 构造真实 `lingze_msgs/msg/PcmAudioFrame`。ROS 名称已相对化，CASBOT launch profile 可解析到 `/lzdl10823/dialog_node`，并加入已验证 QoS 和 `dialog/session_active` 项目兼容语义。
+
+Phase 5 Gate 修复补齐了生命周期边界：stop 在 arecord shutdown 前先 enqueue 本地 flush；capture 异常经线程安全、带 generation/capture token 的回调进入 Controller；cancel 失败仍强制 close transport；ROS spin 结束后会在销毁节点前显式 enqueue 并 drain 最终 flush。68 项 core/mock tests 和 10 项 Phase 2 PoC regression 已通过复审，Gate 5 结论为 `CONDITIONAL PASS`。
+
+Gate 5 的条件仅是后续真实环境验证：ROS2 Humble + vendor overlay 的真实 build/launch、真实 `lingze_msgs.msg.PcmAudioFrame` import、`PcmAudioFrame.format` runtime 值、speaker 接受的 sample-rate/channels 及是否执行 resample/mono-stereo conversion、真实 arecord device string/executable、实机 speaker/嘴型/shutdown flush 行为，以及厂家 `session_active` 精确时序。这些均为 **UNKNOWN / DEFERRED / CONDITIONAL**，已通过配置、Adapter 或 fail-fast 隔离，没有猜测硬编码。该实现尚未部署或运行在机器人上，Phase 6 尚未开始。详见 `docs/ROS2_COMPATIBILITY_SKELETON.md`。
 
 ## Key documents
 

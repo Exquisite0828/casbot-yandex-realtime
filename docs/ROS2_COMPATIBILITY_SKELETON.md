@@ -1,11 +1,13 @@
-# Phase 3 — ROS2 Compatibility Skeleton
+# ROS2 Compatibility Skeleton and Phase 5 Adapter Handoff
 
-> Date: 2026-08-10
-> Status: Phase 3 COMPLETE
-> Gate 3: CONDITIONAL PASS
-> ROS2 runtime launch: NOT RUN (local environment unavailable)
+> Updated: 2026-08-13
+> Phase 3: COMPLETE; historical Gate 3: CONDITIONAL PASS
+> Phase 4: COMPLETE; Gate 4: PASS
+> Phase 5: COMPLETE; Gate 5: CONDITIONAL PASS
+> Phase 6: NOT STARTED
+> Robot deployment/runtime launch: NOT RUN
 
-## Package
+## Package and boundaries
 
 ```text
 package:    realtime_dialog
@@ -14,181 +16,187 @@ build:      ament_python
 target:     Linux / ROS2 Humble / Python 3.10
 ```
 
-The package lives in `src/realtime_dialog`. The implementation has three
-layers:
+The ROS wrapper remains thin. ROS callbacks submit commands to a background
+asyncio worker and never wait for Yandex network I/O. Robot-specific audio is
+kept behind adapters:
 
 ```text
-ROS2 wrapper callbacks
-        ↓ submit only
-background asyncio worker → DialogController → YandexRealtimeClient
-                                ↓
-                       MicAdapter / AudioOutputAdapter
-        ↑
-thread-safe outbound queue → ROS2 publishers
+arecord (configured device, 16 kHz PCM16 mono)
+  → stateful linear 16 → 24 kHz resampler
+  → stateful 20 ms / 960-byte rechunker
+  → callback → bounded asyncio queue (default 50; drop oldest)
+  → exactly one Yandex sender task
+  → YandexRealtimeClient
+  → 24 kHz PCM16 mono response audio
+  → bounded QueuedRobotAudioOutputAdapter
+  → ROS executor thread
+  → lingze_msgs/msg/PcmAudioFrame
 ```
 
-`YandexRealtimeClient` is the reusable, audio-device-independent transport. It
-contains the Phase 2 verified current endpoint, `speech-realtime-260528` model
-URI handling, 2026 `session.update`, audio/text input, response cancel/truncate,
-wire-event normalization, response-to-generation binding, and credential
-redaction. The Phase 2 local PoC imports these shared protocol helpers rather
-than keeping a second copy.
+No third-party DSP package or `audioop` is used. The `arecord` subprocess uses
+an argument list with `shell=False`, redirects stderr so it cannot block, reads
+stdout on a dedicated thread, and has bounded terminate/kill shutdown. A
+missing device or executable fails clearly. The example `hw:0,0` is an
+integration candidate only; Phase 4 verified `/dev/snd/pcmC0D0c` as the device
+held by the vendor process, not an equivalent `arecord --device` string.
+Unexpected capture termination is reported from the reader thread through a
+thread-safe Controller callback. Both dialog generation and a per-capture
+lifecycle token reject late failures from superseded readers; an intentional
+stop disables reporting before terminating arecord.
 
-## ROS2 contract
+## Yandex transport and lifecycle
 
-| Direction | Name | Type | Phase 3 status |
-|---|---|---|---|
-| Service | `/dialog/start_session` | `std_srvs/srv/Trigger` | Wrapper implemented; schedules background start and returns immediately |
-| Service | `/dialog/stop_session` | `std_srvs/srv/Trigger` | Wrapper implemented; schedules background stop and returns immediately |
-| Subscribe | `/dialog/text_input` | `std_msgs/msg/String` | Wrapper implemented; auto-ensures a session in the controller |
-| Publish | `/dialog/status` | `std_msgs/msg/String` | Implemented; Reliable + Transient Local, marked vendor-documented provisional |
-| Publish | `/dialog/text_result` | `std_msgs/msg/String` | Implemented for assistant text deltas |
-| Publish | `/audio/dialog_flush` | `std_msgs/msg/Bool` | Implemented through `AudioOutputAdapter.flush()` with `data=true` |
-| Future publish | `/audio/dialog_play` | `lingze_msgs/msg/PcmAudioFrame` | Adapter target recorded; publisher intentionally deferred to Phase 5 |
+`RuntimeConfig` now separates `input_sample_rate` and
+`yandex_output_sample_rate`; both default to 24 kHz. Phase 2 endpoint, model,
+event schema, Russian language selection and credential redaction are
+unchanged. The local PoC keeps its single `--sample-rate` CLI option and maps
+that value explicitly to both session directions.
 
-No `lingze_msgs` import and no fabricated `PcmAudioFrame` definition exists in
-Phase 3.
+Microphone callbacks no longer create an unbounded task per chunk. A single
+sender drains a bounded queue; full queues drop the oldest waiting chunk and
+increment a counter. Generation changes clear pending chunks and cancel any
+old in-flight sender before starting the new-generation sender.
 
-## State and lifecycle
-
-The public states are:
+Stop ordering is:
 
 ```text
-STATUS_IDLE
-STATUS_CONNECTING
-STATUS_LISTENING
-STATUS_SPEAKING_TEXT
-STATUS_ERROR
+disable events / advance generation
+→ advance playback epoch and enqueue local flush
+→ stop arecord, cancel sender, and clear microphone queue
+→ best-effort cancel current Yandex response
+→ mandatory close transport
+→ STATUS_IDLE
 ```
 
-Main transitions:
+If cancel or close fails, close is still attempted, the result reports the
+cleanup error, and state becomes `STATUS_ERROR`. When ROS spin exits, shutdown
+explicitly enqueues and drains one final flush before `destroy_node()`; the
+drain only publishes already queued output and retains the normal
+generation/playback-epoch guard for audio packets.
+
+Text replacement and `speech_started` interruption likewise advance the
+generation and enqueue local flush before awaiting remote cancel. Exact
+`conversation.item.truncate` playback progress remains a later integration
+item; Phase 5 does not invent speaker progress feedback.
+
+## Relative ROS2 contract and CASBOT profile
+
+All application names are relative so namespace launch settings are honored:
+
+| Direction | Relative name | Type |
+|---|---|---|
+| Service | `dialog/start_session` | `std_srvs/srv/Trigger` |
+| Service | `dialog/stop_session` | `std_srvs/srv/Trigger` |
+| Subscribe | `dialog/text_input` | `std_msgs/msg/String` |
+| Publish | `dialog/status` | `std_msgs/msg/String` |
+| Publish | `dialog/text_result` | `std_msgs/msg/String` |
+| Publish | `dialog/session_active` | `std_msgs/msg/Bool` |
+| Publish | `audio/dialog_play` | `lingze_msgs/msg/PcmAudioFrame` |
+| Publish | `audio/dialog_flush` | `std_msgs/msg/Bool` |
+
+Generic defaults remain an empty namespace and node name
+`realtime_dialog_node`. `launch/casbot_realtime_dialog.launch.py` supplies
+overridable example values `namespace=lzdl10823` and `node_name=dialog_node`,
+resolving to the Phase 4-observed surface such as
+`/lzdl10823/audio/dialog_play` and `/lzdl10823/dialog/status`.
+
+## QoS and `session_active`
+
+Phase 4 verified Reliability and Durability; history depth was not collected.
+The code therefore records depth only as an implementation buffer policy:
+
+| Relative topic | Reliability | Durability | Project depth |
+|---|---|---|---:|
+| `audio/dialog_play` | RELIABLE | VOLATILE | 10 |
+| `audio/dialog_flush` | RELIABLE | VOLATILE | 10 |
+| `dialog/status` | RELIABLE | TRANSIENT_LOCAL | 1 |
+| `dialog/text_result` | RELIABLE | VOLATILE | 10 |
+| `dialog/session_active` | RELIABLE | TRANSIENT_LOCAL | 1 |
+
+`dialog/session_active` uses this **PROJECT COMPATIBILITY SEMANTIC**, not a
+claim about exact vendor timing:
 
 ```text
-start: IDLE → CONNECTING → session.updated → LISTENING
-answer: LISTENING → response.created → SPEAKING_TEXT → response.done → LISTENING
-stop: invalidate generation → cancel → flush → close → IDLE
-error: active current-generation transport/session error → ERROR
+STATUS_IDLE          → false
+STATUS_CONNECTING    → true
+STATUS_LISTENING     → true
+STATUS_SPEAKING_TEXT → true
+STATUS_ERROR         → false
 ```
 
-`/dialog/text_input` trims and rejects empty text. If no session is active it
-starts one without inventing a robot microphone source, then sends the text. A
-duplicate start does not open another WebSocket.
+Initial status/session-active output is `STATUS_IDLE`/`false`; each status
+transition queues its corresponding Bool value.
 
-Every lifecycle/replacement uses a monotonically increasing `generation_id`.
-Response IDs are bound to the generation in which `response.created` arrived.
-Text, audio, completion, and error events from an old generation are dropped.
-Stop also disables event acceptance before closing, so a late session-level
-error cannot move an idle controller back to `STATUS_ERROR`.
+## `PcmAudioFrame` and output stale suppression
 
-## Non-blocking ROS boundary
+The ROS path imports the real `lingze_msgs.msg.PcmAudioFrame`; no local fake
+message package exists. If it cannot be imported, startup explains that the
+current environment lacks it and points integrators to the vendor overlay
+normally sourced from `/lingze/install/setup.bash`.
 
-ROS service and subscription callbacks only create and submit controller
-coroutines to `AsyncioWorker`; they never wait for WebSocket connection, setup,
-send, cancel, or close. Controller status/text/flush events are placed in a
-thread-safe queue and published by a short ROS timer callback on the executor
-side.
-
-The real API key is not a ROS parameter. The node obtains
-`YANDEX_API_KEY` through `RuntimeConfig.from_environment`; it is excluded from
-configuration representations and redacted from remote error text. Endpoint,
-model/model URI, folder ID, Yandex-side sample rate, voice, VAD threshold,
-silence duration, instructions, and connect/setup timeouts are non-secret ROS
-parameters.
-
-## Phase 4 runtime evidence and Adapter handoff
-
-Phase 4 read-only runtime evidence, frozen on 2026-08-11, resolved the hardware
-and ROS boundary facts that Phase 3 intentionally left open.
-
-**VERIFIED:**
+The factory maps only Phase 4-verified fields:
 
 ```text
-actual dialog node: /lzdl10823/dialog_node
-actual namespace: /lzdl10823
-runtime executable:
-  /lingze/install/lingze_omni_s2s/lib/lingze_omni_s2s/dialog_node
-
-microphone source: direct ALSA capture, not an observed ROS2 input subscription
-capture device: /dev/snd/pcmC0D0c (Yundea 1076 USB Audio)
-capture PCM: MMAP_INTERLEAVED, S16_LE, mono, 16000 Hz
-period_size: 1024 frames
-buffer_size: 16384 frames
+stamp       = node clock now
+sample_rate = actual Yandex payload rate (default 24000)
+channels    = actual payload channels (1)
+format      = required speaker_pcm_format parameter
+data        = raw PCM bytes represented as uint8 values
 ```
 
-The installed `lingze_msgs/msg/PcmAudioFrame` schema is:
+`speaker_pcm_format` has no guessed default. Empty configuration fails with:
 
 ```text
-builtin_interfaces/Time stamp
-uint32 sample_rate
-uint8 channels
-string format
-uint8[] data
+PcmAudioFrame.format is not configured; vendor runtime value is unknown
 ```
 
-Observed QoS:
+No 24→48 kHz resampling or mono→stereo conversion is performed. Physical
+playback hardware observed at 48 kHz stereo is not treated as the ROS message
+contract.
 
-| Topic | Reliability | Durability | History depth |
-|---|---|---|---|
-| `/lzdl10823/audio/dialog_play` | RELIABLE | VOLATILE | UNKNOWN |
-| `/lzdl10823/audio/dialog_flush` | RELIABLE | VOLATILE | UNKNOWN |
-| `/lzdl10823/dialog/status` | RELIABLE | TRANSIENT_LOCAL | UNKNOWN |
-| `/lzdl10823/dialog/text_result` | RELIABLE | VOLATILE | UNKNOWN |
+Every queued audio packet carries generation and playback epoch. `flush()`
+atomically increments the epoch, removes old queued audio, and puts a flush
+event before later audio. A second guarded check at ROS publish time rejects a
+packet invalidated by a concurrent flush after drain.
+Flush events deliberately survive generation changes as barriers: interruption
+flush is published before any subsequently queued new-generation audio.
 
-`/lzdl10823/dialog/session_active` is also published with RELIABLE +
-TRANSIENT_LOCAL QoS and has a live `face_play_example` subscriber. It was not in
-the early public compatibility list, so Phase 5 must evaluate and likely retain
-it. `/lzdl10823/dialog/input_waveform` is a BEST_EFFORT + VOLATILE output of
-`dialog_node`, not a microphone input.
+## Configuration and dependencies
 
-The Phase 3 code remains a skeleton: `PendingRobotMicAdapter` still supplies no
-audio, and `PendingRobotAudioOutputAdapter` still has no
-`PcmAudioFrame` publisher. Phase 5 must implement those adapters and namespace
-alignment using the verified facts above.
+`config/casbot.example.yaml` contains non-secret adapter/Yandex parameters.
+`mic_device` and `speaker_pcm_format` must be confirmed by an integrator;
+credentials remain process-environment-only through `YANDEX_API_KEY`.
+`package.xml` declares `lingze_msgs`, and setup installs launch/config files.
 
-Still unresolved without guesswork:
+## Local verification status
 
-- **DEFERRED:** actual string expected in `PcmAudioFrame.format`;
-- **NOT OBSERVED / DEFERRED:** whether `audio_speaker_node` resamples input or
-  converts mono to stereo, and its accepted frame combinations;
-- **DEFERRED:** use Yandex at 16 kHz or resample 16 kHz → 24 kHz;
-- **NOT COLLECTED:** exact original status sequence and black-box experience
-  baseline.
+On 2026-08-13, 68 core/mock tests covered PCM validation, continuous
+resampling, rechunk/reset, fake arecord lifecycle, bounded microphone sender,
+generation and capture-error suppression, flush ordering/epoch suppression,
+cancel/close cleanup, final shutdown drain, message mapping, relative names,
+QoS, session-active semantics, metadata and Yandex rate split.
+All 10 Phase 2 PoC regression tests also passed. Compileall passed.
 
-See `docs/RUNTIME_SNAPSHOT.md` for the complete evidence and caveats.
+The current macOS environment has no `ros2`, `colcon`, `rclpy` or
+`lingze_msgs`, so a real ROS2 Humble build and wrapper launch were **NOT RUN —
+environment unavailable**. This statement is not a ROS runtime PASS.
 
-## Local verification
+## Gate 5 conditional runtime items
 
-The local host is macOS with Python 3.14 and has neither `ros2` nor `rclpy`.
-Installing ROS2 Humble was intentionally skipped. Verification used the
-ROS-independent core, fakes, source/package metadata checks, and Python compile
-checks:
+Gate 5 is `CONDITIONAL PASS`. Its conditions are limited to these real
+environment checks:
 
-```text
-Phase 2 protocol helper tests: 10 passed
-Phase 3 core/mock tests:       21 passed
-Combined:                      31 passed
-```
+- ROS2 Humble + vendor overlay real build/launch: UNKNOWN / DEFERRED / CONDITIONAL.
+- Real `lingze_msgs.msg.PcmAudioFrame` import: UNKNOWN / DEFERRED / CONDITIONAL.
+- Real `PcmAudioFrame.format` runtime value: UNKNOWN / DEFERRED / CONDITIONAL; required config.
+- Speaker accepted sample-rate/channel combinations: UNKNOWN / DEFERRED / CONDITIONAL.
+- Speaker resample and mono-stereo conversion behavior: UNKNOWN / DEFERRED / CONDITIONAL.
+- Actual robot `arecord` device string and executable: UNKNOWN / DEFERRED / CONDITIONAL.
+- Real speaker, mouth and shutdown-flush behavior: UNKNOWN / DEFERRED / CONDITIONAL.
+- Exact vendor `session_active` timing: UNKNOWN / DEFERRED / CONDITIONAL; exact timing was not collected.
 
-Coverage includes exact contract names and types, non-blocking command
-submission, current Yandex schemas, error redaction, state transitions,
-text-session auto-start, adapter routing, cancel/flush/close ordering,
-interruption, and stale text/audio/done/error rejection.
-
-Because an actual ROS2 Humble runtime was unavailable, the package was not
-built with `colcon` and the node was not launched. This is the sole condition on
-Gate 3.
-
-## Gate 3
-
-```text
-Gate 3: CONDITIONAL PASS
-Phase 3: COMPLETE
-Phase 4: COMPLETE
-Gate 4: PASS
-Phase 5: NOT STARTED
-```
-
-Gate 3 remains the historical Phase 3 result: the local Mac could not launch a
-ROS2 Humble wrapper. Phase 4 later froze the robot interface facts without
-changing that historical conclusion. No Phase 5 adapter implementation or
-deployment has started.
+These unknowns are isolated by configuration, adapters or fail-fast behavior;
+none is guessed or hardcoded. `dialog/input_waveform`, `system/config_update`
+and the final bringup/deployment switch remain separate deferred future scope,
+not additional Gate 5 conditions. The robot has not been connected to Yandex,
+and Phase 6 has not started.

@@ -485,7 +485,8 @@ class LiveSession:
                     await self.send(
                         ws,
                         build_session_update(
-                            sample_rate=self.options.sample_rate,
+                            input_sample_rate=self.options.sample_rate,
+                            output_sample_rate=self.options.sample_rate,
                             voice=self.options.voice,
                             vad_threshold=self.options.vad_threshold,
                             silence_ms=self.options.silence_ms,
