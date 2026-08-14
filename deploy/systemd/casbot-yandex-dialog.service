@@ -1,0 +1,22 @@
+[Unit]
+Description=CASBOT Yandex Realtime compatible dialog node
+Wants=network-online.target
+After=network-online.target lingze_robot.service
+Requires=lingze_robot.service
+PartOf=lingze_robot.service
+ConditionPathExists=/etc/casbot-yandex-realtime/external-dialog.enabled
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/casbot-yandex-realtime/yandex.env
+ExecStartPre=/opt/casbot-yandex-realtime/deploy/bin/casbot-yandex-preflight --mode service
+ExecStart=/opt/casbot-yandex-realtime/deploy/bin/casbot-yandex-launch
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStartSec=45s
+TimeoutStopSec=10s
+Restart=no
+
+[Install]
+WantedBy=multi-user.target

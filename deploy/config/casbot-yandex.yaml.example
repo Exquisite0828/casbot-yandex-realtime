@@ -1,0 +1,33 @@
+# Phase 8 production template. Copy to /etc/casbot-yandex-realtime/casbot-yandex.yaml.
+# hw:0,0 is supported by current device enumeration, but is NOT a capture PASS.
+# Phase 8 must open it after the vendor dialog exits.
+/**:
+  ros__parameters:
+    mic_backend: "arecord"
+    mic_executable: "/usr/bin/arecord"
+    mic_device: "hw:0,0"
+    mic_source_sample_rate: 16000
+    mic_channels: 1
+    mic_format: "S16_LE"
+    mic_chunk_ms: 20
+    mic_queue_chunks: 50
+
+    yandex_input_sample_rate: 24000
+    yandex_output_sample_rate: 24000
+
+    # REQUIRED: Phase 8 must fill this from observed vendor metadata or vendor confirmation.
+    # An empty value intentionally blocks service preflight and node startup.
+    speaker_pcm_format: ""
+    speaker_sample_rate: 24000
+    speaker_channels: 1
+    speaker_queue_packets: 100
+
+    yandex_endpoint: "wss://ai.api.cloud.yandex.net/v1/realtime"
+    yandex_model: "speech-realtime-260528"
+    yandex_folder_id: ""
+    yandex_voice: "dasha"
+    yandex_vad_threshold: 0.5
+    yandex_silence_ms: 500
+    yandex_instructions: "Ты дружелюбный голосовой ассистент. Всегда отвечай на русском языке, кратко и естественно. Помни контекст текущего разговора."
+    yandex_connect_timeout: 15.0
+    yandex_setup_timeout: 10.0

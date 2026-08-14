@@ -327,3 +327,76 @@ Phase 4 — COMPLETE
 Gate 4 — PASS
 Phase 5 — NOT STARTED
 ```
+
+## Phase 7 supplemental read-only evidence (2026-08-14)
+
+本节补充 Phase 7 由用户提供的只读 SSH 输出。它不改写或替代上面的 Phase 4
+冻结结论。证据等级为 **VERIFIED BY USER-PROVIDED READ-ONLY SSH TRANSCRIPT**；
+本轮 Codex 没有重新 SSH，也没有执行机器人命令。
+
+**VERIFIED BY USER-PROVIDED READ-ONLY SSH TRANSCRIPT：**
+
+```text
+hostname: xiaoling0040
+robot_current_mode: jijia
+current_llm: lingze_omni_s2s
+namespace: lzdl10823
+
+ROS2 node: /lzdl10823/dialog_node
+runtime executable:
+  /lingze/install/lingze_omni_s2s/lib/lingze_omni_s2s/dialog_node
+parent launch process:
+  /usr/bin/python3 /opt/ros/humble/bin/ros2 launch bringup bringup.launch.py
+installed mode launch:
+  /lingze/install/bringup/share/bringup/launch/launch/jijia.launch.py
+```
+
+`jijia.launch.py` 中 `_dialog_backend_node()` 读取
+`/lingze/config/user_config.json` 的 `current_llm`，只把
+`lingze_omni_s2s`/`lingze_s2s` 映射到相应 package，再启动 executable
+`dialog_node`。dialog、speaker、Web、系统命令、触摸、摄像头及其他节点是并列
+启动项。厂家技术支持表示可在 bringup launch 屏蔽其中一个节点。
+
+在已搜索的 bringup launch 目录中没有发现 dialog 专用 `respawn`、
+`OnProcessExit` 或 restart 定义。因此只确认“该 launch 定义没有 dialog 独立自动
+拉起”；机器人其他位置是否有 watchdog 保持 **UNKNOWN**。
+
+厂家主 service 内容补充为：
+
+```ini
+Type=simple
+User=root
+WorkingDirectory=/lingze
+ExecStart=/bin/bash /lingze/bin/start_robot.sh
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStopSec=5s
+Restart=always
+RestartSec=5s
+```
+
+`start_robot.sh` 会 source `/opt/tros/humble/setup.bash` 或
+`/opt/ros/humble/setup.bash`、设置 RMW/FastDDS、source
+`/lingze/install/setup.bash`、等待设备并 exec bringup launch。停止该 service 会
+停止整个 ROS2 control group，因此不能作为长期只禁用 dialog 的部署方式。
+
+构建/运行环境补充事实：
+
+```text
+ROS2 Humble
+Python 3.10.12
+colcon: /usr/local/bin/colcon
+rclpy: import OK
+lingze_msgs.msg.PcmAudioFrame: import OK
+arecord: /usr/bin/arecord
+capture enumeration: card 0 / device 0, Yundea 1076 USB Audio
+aiohttp in current system Python: NOT INSTALLED
+```
+
+`hw:0,0` 只是由设备枚举支持的集成候选；尚未在厂家 dialog 退出后实际打开，
+不是 capture PASS。曾只读监听 `/lzdl10823/audio/dialog_play` metadata 30 秒，因
+办公室无人触发机器人回答而未收到消息。该 timeout 不提供 `format`、rate 或
+channels 事实。
+
+本补充证据采集没有机器人修改；本轮也没有 SSH、systemd 操作、marker 创建、
+上传、安装、进程停止或真实 Yandex 调用。

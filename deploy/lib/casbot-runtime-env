@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+# Shared ROS/vendor/venv environment loader for deployment control commands.
+
+casbot_source_runtime() {
+  local deployment_root="/"
+  local arguments=("$@")
+  local index=0
+  while (( index < ${#arguments[@]} )); do
+    case "${arguments[$index]}" in
+      --root)
+        (( index + 1 < ${#arguments[@]} )) || return 2
+        deployment_root="${arguments[$((index + 1))]%/}"
+        [[ -n "$deployment_root" ]] || deployment_root="/"
+        ((index += 2))
+        ;;
+      --root=*)
+        deployment_root="${arguments[$index]#--root=}"
+        deployment_root="${deployment_root%/}"
+        [[ -n "$deployment_root" ]] || deployment_root="/"
+        ((index += 1))
+        ;;
+      *)
+        ((index += 1))
+        ;;
+    esac
+  done
+
+  casbot_runtime_path() {
+    if [[ "$deployment_root" == "/" ]]; then
+      printf '%s' "$1"
+    else
+      printf '%s%s' "$deployment_root" "$1"
+    fi
+  }
+
+  local tros_setup
+  local ros_setup
+  local vendor_setup
+  local venv_activate
+  local project_setup
+  local venv_python
+  local fastdds_profile
+  tros_setup="$(casbot_runtime_path /opt/tros/humble/setup.bash)"
+  ros_setup="$(casbot_runtime_path /opt/ros/humble/setup.bash)"
+  vendor_setup="$(casbot_runtime_path /lingze/install/setup.bash)"
+  venv_activate="$(casbot_runtime_path /opt/casbot-yandex-realtime/venv/bin/activate)"
+  project_setup="$(casbot_runtime_path /opt/casbot-yandex-realtime/install/setup.bash)"
+  venv_python="$(casbot_runtime_path /opt/casbot-yandex-realtime/venv/bin/python)"
+  fastdds_profile="$(casbot_runtime_path /opt/tros/humble/lib/hobot_shm/config/shm_fastdds.xml)"
+
+  if [[ -f "$tros_setup" ]]; then
+    # shellcheck disable=SC1090
+    source "$tros_setup"
+  elif [[ -f "$ros_setup" ]]; then
+    # shellcheck disable=SC1090
+    source "$ros_setup"
+  fi
+  export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+  export FASTRTPS_DEFAULT_PROFILES_FILE="$fastdds_profile"
+  export RMW_FASTRTPS_USE_QOS_FROM_XML=1
+  export ROS_DISABLE_LOANED_MESSAGES=0
+  if [[ -f "$vendor_setup" ]]; then
+    # shellcheck disable=SC1090
+    source "$vendor_setup"
+  fi
+  if [[ -f "$venv_activate" ]]; then
+    # shellcheck disable=SC1090
+    source "$venv_activate"
+  fi
+  if [[ -f "$project_setup" ]]; then
+    # shellcheck disable=SC1090
+    source "$project_setup"
+  fi
+  if [[ -x "$venv_python" ]]; then
+    CASBOT_DEPLOY_PYTHON="$venv_python"
+  else
+    CASBOT_DEPLOY_PYTHON="$(command -v python3)"
+  fi
+  export CASBOT_DEPLOY_PYTHON
+}

@@ -4,6 +4,7 @@
 !.env.example
 config/*.env
 !config/example.env
+deploy/config/*.env
 
 # Python
 __pycache__/
@@ -26,7 +27,7 @@ log/
 runtime_snapshot/raw/
 
 # One-time Codex task file
-CODEX_EXECUTION_TASK.md
+CODEX_EXECUTION_TASK*.md
 
 # Logs
 *.log

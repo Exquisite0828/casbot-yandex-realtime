@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+deploy_dir="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=../lib/casbot-runtime-env
+source "$deploy_dir/lib/casbot-runtime-env"
+casbot_source_runtime "$@"
+export PYTHONPATH="$deploy_dir/lib${PYTHONPATH:+:$PYTHONPATH}"
+exec "$CASBOT_DEPLOY_PYTHON" -c 'from casbot_deploy.cli import metadata_probe_main; raise SystemExit(metadata_probe_main())' "$@"

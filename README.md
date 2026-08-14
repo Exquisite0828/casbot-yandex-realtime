@@ -24,7 +24,9 @@ Phase 5 — COMPLETE
 Gate 5 — CONDITIONAL PASS
 Phase 6 — COMPLETE
 Gate 6 — PASS
-Phase 7 — NOT STARTED
+Phase 7 — COMPLETE
+Gate 7 — CONDITIONAL PASS
+Phase 8 — NOT STARTED
 ```
 
 本地 Phase 2 真人 PoC 已使用 `speech-realtime-260528` 跑通当前 WebSocket、24 kHz PCM 麦克风输入、俄语多轮回答、增量回答音频和本地扬声器输出；未使用 fallback。播放中本地停止与 truncate 曾实际成功，用户随后明确取消了“生成中 response.cancel 必须 live 验证”的本轮要求。详见 `docs/YANDEX_REALTIME_LOCAL_POC.md`。
@@ -41,6 +43,10 @@ Gate 5 的条件仅是后续真实环境验证：ROS2 Humble + vendor overlay �
 
 Phase 6 已完成并通过 Gate 6 本地软件测试复审。测试通过构造器专用 connector 将严格校验后的官方 Yandex URL 映射到 `127.0.0.1` 临时端口，实际经过 aiohttp TCP/WebSocket handshake 和 JSON 收发；生产 endpoint 校验、生产 connector 与 session schema 均未放宽。正常语音/文本链路、统一 lifecycle 串行、stop/interruption/stale suppression、response-generation map 释放、setup/runtime 故障、异常清理、五条凭据脱敏路径、显式恢复及 5 次资源生命周期均有覆盖。103 项 core/integration tests 与 10 项 Phase 2 PoC regression 通过；没有真实 Yandex 调用、ROS2/机器人运行或自动重连。Gate 6 的 `PASS` 仅证明该本地测试范围，不表示机器人已接入 Yandex。Gate 5 保留的 ROS2/vendor overlay、真实消息 import、speaker/arecord 参数和实机行为仍为 **UNKNOWN / DEFERRED / CONDITIONAL**；它们不是 Gate 6 的本地软件阻塞项，留待后续集成环境验证。详见 `docs/PHASE6_SYSTEMATIC_TESTING.md`。
 
+Phase 7 已取得用户提供的只读启动链补充证据：当前 `jijia.launch.py` 直接启动厂家 dialog，且 dialog 与 speaker/Web/运动等是并列项；停止整个 `lingze_robot.service` 会停止全部厂家 ROS2 进程组，因此部署路线冻结为“厂家 launch marker gate + 独立 Yandex workspace/venv/systemd service”。本地已实现默认 dry-run 的 gate、preflight、verify、switch、rollback 和 metadata probe；当前没有部署、没有禁用厂家节点。Phase 7 已 **COMPLETE**，Gate 7 为 **CONDITIONAL PASS**，Phase 8 **NOT STARTED**。详见 `docs/PHASE7_DEPLOYMENT_DESIGN.md` 和 `deploy/README.md`。
+
+`PcmAudioFrame.format`、厂家实际发布 rate/channels、speaker 接受/转换能力、`hw:0,0` 实际打开、speaker/嘴型/flush、厂家 `session_active` 精确时序、真实凭据/Yandex 网络和正式 switch/rollback 仍为 **UNKNOWN / DEFERRED / CONDITIONAL**，必须留到单独授权的 Phase 8。
+
 ## Key documents
 
 ```text
@@ -49,6 +55,7 @@ docs/YANDEX_REALTIME_MIGRATION_PLAN.md
 docs/YANDEX_REALTIME_VERIFIED.md
 docs/YANDEX_REALTIME_LOCAL_POC.md
 docs/PHASE6_SYSTEMATIC_TESTING.md
+docs/PHASE7_DEPLOYMENT_DESIGN.md
 docs/ROS2_COMPATIBILITY_SKELETON.md
 docs/RUNTIME_SNAPSHOT.md
 docs/vendor/二开文档.md

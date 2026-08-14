@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+deploy_dir="$(cd "$(dirname "$0")/.." && pwd)"
+deployment_root="/"
+if [[ "${1:-}" == "--root" ]]; then
+  if [[ -z "${2:-}" ]]; then
+    echo "ERROR: --root requires a path" >&2
+    exit 2
+  fi
+  deployment_root="${2%/}"
+  [[ -n "$deployment_root" ]] || deployment_root="/"
+  shift 2
+fi
+if [[ "$#" -ne 0 ]]; then
+  echo "ERROR: unexpected launch arguments" >&2
+  exit 2
+fi
+
+rooted_path() {
+  if [[ "$deployment_root" == "/" ]]; then
+    printf '%s' "$1"
+  else
+    printf '%s%s' "$deployment_root" "$1"
+  fi
+}
+
+require_file() {
+  if [[ ! -f "$1" ]]; then
+    echo "ERROR: required environment file is missing: $1" >&2
+    exit 1
+  fi
+}
+
+tros_setup="$(rooted_path /opt/tros/humble/setup.bash)"
+ros_setup="$(rooted_path /opt/ros/humble/setup.bash)"
+if [[ -f "$tros_setup" ]]; then
+  selected_ros_setup="$tros_setup"
+elif [[ -f "$ros_setup" ]]; then
+  selected_ros_setup="$ros_setup"
+else
+  echo "ERROR: ROS2 Humble setup is missing" >&2
+  exit 1
+fi
+
+vendor_setup="$(rooted_path /lingze/install/setup.bash)"
+venv_activate="$(rooted_path /opt/casbot-yandex-realtime/venv/bin/activate)"
+project_setup="$(rooted_path /opt/casbot-yandex-realtime/install/setup.bash)"
+project_executable="$(rooted_path /opt/casbot-yandex-realtime/install/realtime_dialog/lib/realtime_dialog/realtime_dialog_node)"
+parameter_file="$(rooted_path /etc/casbot-yandex-realtime/casbot-yandex.yaml)"
+fastdds_profile="$(rooted_path /opt/tros/humble/lib/hobot_shm/config/shm_fastdds.xml)"
+user_config="$(rooted_path /lingze/config/user_config.json)"
+
+require_file "$vendor_setup"
+require_file "$venv_activate"
+require_file "$project_setup"
+require_file "$parameter_file"
+require_file "$fastdds_profile"
+require_file "$user_config"
+if [[ ! -x "$project_executable" ]]; then
+  echo "ERROR: installed realtime_dialog_node executable is missing" >&2
+  exit 1
+fi
+
+# shellcheck disable=SC1090
+source "$selected_ros_setup"
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export FASTRTPS_DEFAULT_PROFILES_FILE="$fastdds_profile"
+export RMW_FASTRTPS_USE_QOS_FROM_XML=1
+export ROS_DISABLE_LOANED_MESSAGES=0
+# shellcheck disable=SC1090
+source "$vendor_setup"
+# shellcheck disable=SC1090
+source "$venv_activate"
+# shellcheck disable=SC1090
+source "$project_setup"
+
+config_namespace="$(
+  PYTHONPATH="$deploy_dir/lib${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -c \
+    'import sys; from casbot_deploy.robot_config import launch_guard_main; raise SystemExit(launch_guard_main(sys.argv[1]))' \
+    "$user_config"
+)"
+namespace="${CASBOT_ROS_NAMESPACE:-}"
+if [[ -z "$namespace" ]]; then
+  namespace="$config_namespace"
+fi
+if [[ ! "$namespace" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+  echo "ERROR: namespace must be one non-empty ROS token" >&2
+  exit 1
+fi
+
+exec "$project_executable" \
+  --ros-args \
+  -r __node:=dialog_node \
+  -r "__ns:=/$namespace" \
+  --params-file "$parameter_file"
