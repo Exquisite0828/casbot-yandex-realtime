@@ -98,14 +98,37 @@ restored without a passing verifier report.
 This repair is local repository evidence only. The new fixed source has not
 been synchronized to the robot, and a second switch has not been run.
 
+## Phase 8F microphone CLI compatibility evidence
+
+User-provided field results established the following command-level behavior:
+
+```text
+arecord --type raw
+→ RC=1; unsupported option
+
+arecord -D hw:0,0 -f S16_LE -c 1 -r 16000 -t raw
+→ recording started successfully; timeout terminated it; RC=124
+```
+
+The timeout return code records the deliberate external timeout, not an
+`arecord` startup failure. This verifies the replacement capture tuple
+`hw:0,0 / S16_LE / mono / 16000 Hz` on the robot. The project adapter used the
+unsupported long option `--type raw`; it now uses the supported equivalent
+`--file-type raw` while preserving device, format, channel and rate arguments.
+
+This is a project adapter CLI compatibility bug. It is not evidence of a
+manufacturer watchdog, anti-third-party behavior, or another vendor protection
+mechanism. This repository repair did not run the command or access the robot.
+
 ## Remaining Phase 8 conditions
 
 - synchronize one reviewed fixed commit and rerun preflight on the robot;
 - run the separately authorized second switch while preserving every readiness
   report and final-state output;
 - prove the replacement ROS2 node start and complete human acceptance;
-- prove `hw:0,0` capture, speaker/mouth/flush behavior, and exact
-  `session_active` timing;
+- retain `hw:0,0 / S16_LE / mono / 16000 Hz` capture as VERIFIED field evidence;
+- prove replacement-path speaker/mouth/flush behavior and exact `session_active`
+  timing;
 - execute and verify a real normal rollback;
 - retain the first transition's exact historical failure as UNKNOWN;
 - retain vendor watchdog/anti-third-party behavior as NOT PROVEN.

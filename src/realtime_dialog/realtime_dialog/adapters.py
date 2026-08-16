@@ -132,7 +132,7 @@ class ArecordMicAdapter:
                 str(self.channels),
                 "--rate",
                 str(self.source_sample_rate),
-                "--type",
+                "--file-type",
                 "raw",
             ]
             try:

@@ -95,7 +95,7 @@ class ArecordMicAdapterTest(unittest.TestCase):
         options.update(overrides)
         return ArecordMicAdapter(**options), factory
 
-    def test_command_is_argument_list_and_never_uses_shell(self) -> None:
+    def test_command_uses_file_type_raw_and_never_uses_shell(self) -> None:
         adapter, factory = self.make_adapter(FakeProcess([]))
         adapter.start(lambda _pcm: None)
         adapter.stop()
@@ -112,10 +112,11 @@ class ArecordMicAdapterTest(unittest.TestCase):
                 "1",
                 "--rate",
                 "16000",
-                "--type",
+                "--file-type",
                 "raw",
             ],
         )
+        self.assertNotIn("--type", command)
         self.assertIs(kwargs["shell"], False)
         self.assertIs(kwargs["stderr"], subprocess.DEVNULL)
 
