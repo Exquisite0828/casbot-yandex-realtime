@@ -2,10 +2,11 @@
 
 > Phase 7 — COMPLETE
 > Gate 7 — CONDITIONAL PASS
-> Phase 8 — NOT STARTED
-> Local artifact only. The robot is not deployed.
+> Phase 8 — IN PROGRESS
+> Phase 8C — ROBOT BUILD COMPLETE; CONTROL-PLANE REVALIDATION PENDING
+> Robot Yandex runtime / formal switch / formal rollback — NOT STARTED
 > All write commands are dry-run unless `--apply` is supplied.
-> Phase 8 requires a separate authorization and maintenance window.
+> This repository repair did not access or modify the robot.
 
 ## Layout
 
@@ -47,6 +48,37 @@ source /opt/casbot-yandex-realtime/install/setup.bash
 
 Do not install `aiohttp` into system Python.
 
+The Phase 8C robot did not have ensurepip, and apt exposed no installable
+Candidate. The verified fallback was:
+
+```bash
+python3 -m venv --without-pip --system-site-packages /opt/casbot-yandex-realtime/venv
+python3 -m pip install --target <venv-purelib> \
+  -r /opt/casbot-yandex-realtime/deploy/config/requirements.txt
+```
+
+Here system pip is only the installer; the target must be the independent
+venv's actual purelib. Before proceeding, verify that the venv Python resolves
+`rclpy` and `lingze_msgs` through the intended ROS/vendor paths, resolves
+`aiohttp` from venv purelib, and that system Python still cannot import
+`aiohttp`. Do not change apt sources, install aiohttp into system Python, or
+assume a generic purelib path.
+
+## External setup and strict shell mode
+
+Deployment Bash entry points keep `set -euo pipefail`. ROS/ament and vendor
+setup files are external shell code and can legitimately inspect variables that
+are unset. Every production setup source point therefore uses
+`casbot_source_setup_file` from `lib/casbot-runtime-env`: it sources the file in
+the current shell, temporarily relaxes only nounset, preserves environment side
+effects, propagates the setup return code and stderr, then restores the caller's
+original nounset state. Do not replace this with a subshell, a hardcoded
+`AMENT_TRACE_SETUP_FILES` value, or a wrapper-wide `set +u`.
+
+The repository repair has passed local regression only. The complete deployment
+assets still need to be synchronized from one fixed commit and build preflight
+must be rerun on the robot before any transition or Yandex service start.
+
 ## Vendor launch gate
 
 Status and plans are read-only:
@@ -85,9 +117,12 @@ deploy/config/yandex.env.example
   → /etc/casbot-yandex-realtime/yandex.env (0600)
 ```
 
-`speaker_pcm_format` intentionally remains empty. Capture vendor metadata or
-obtain vendor confirmation before filling it. `hw:0,0` is a device-enumeration
-candidate, not a capture PASS.
+The example keeps `speaker_pcm_format` empty to force an explicit deployment
+choice. Phase 8 field evidence now supports the production output tuple
+`sample_rate=24000`, `channels=1`, `speaker_pcm_format=pcm_s16le`: the vendor
+frame was observed and the speaker audibly played it. This does not prove mouth
+movement, internal speaker conversion, flush behavior, or `hw:0,0` capture;
+`hw:0,0` remains only a device-enumeration candidate.
 
 Never print or commit populated `yandex.env`.
 

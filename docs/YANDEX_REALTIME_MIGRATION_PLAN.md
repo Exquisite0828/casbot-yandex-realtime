@@ -1,7 +1,7 @@
 # CASBOT → Yandex Realtime 迁移实施计划
 
 > 版本：v1.0  
-> 状态：Phase 7 COMPLETE；Gate 7 CONDITIONAL PASS；Phase 8 NOT STARTED
+> 状态：Phase 7 COMPLETE；Gate 7 CONDITIONAL PASS；Phase 8 IN PROGRESS；Phase 8C ROBOT BUILD COMPLETE / CONTROL-PLANE REVALIDATION PENDING
 > 目标平台：Linux / ROS2 Humble / Python 3.10  
 > 核心原则：本地开发优先、最少 SSH、保持机器人外部 ROS2 契约不变、可快速回滚。
 
@@ -371,10 +371,11 @@ ROS2 Node
 - [x] ROS shutdown 在 destroy 前显式 enqueue/drain 最终 flush；flush 作为跨 generation barrier 保留。
 - [x] ROS 名称相对化；新增可覆盖 namespace/node name 的 CASBOT launch profile。
 - [x] 声明 `lingze_msgs` 正式依赖并安装 launch/config 示例。
-- [ ] 在 ROS2 Humble + vendor overlay 环境 build/launch（本地环境缺失，未运行）。
-- [ ] 实机确认 `PcmAudioFrame.format`、speaker acceptance、arecord device 与真实播放/嘴型。
+- [x] Phase 8C 已在 ROS2 Humble + vendor overlay 实机完成 build 和安装产物验证；Yandex launch/runtime 未开始。
+- [x] Phase 8 实机确认厂家输出 `PcmAudioFrame` 为 `24000 / 1 / pcm_s16le` 且 speaker 实际出声。
+- [ ] 实机确认 speaker 内部转换、`hw:0,0` 实际打开、嘴型、flush 与 `session_active` 精确时序。
 
-**Gate 5（2026-08-13）：CONDITIONAL PASS。** Phase 5 本地机器人接口适配与生命周期修复已完成，68 项 core/mock tests 和 10 项 Phase 2 PoC regression 通过。条件仅限以下真实环境验证项：ROS2 Humble + vendor overlay 的真实 build/launch、`lingze_msgs.msg.PcmAudioFrame` 的真实 import、`PcmAudioFrame.format` 的真实 runtime 值、speaker 接受的 sample-rate/channels、speaker 是否执行 resample/mono-stereo conversion、真实 arecord device string/executable、实机 speaker/嘴型/shutdown flush 行为，以及厂家 `session_active` 精确时序。这些项继续标记为 **UNKNOWN / DEFERRED / CONDITIONAL**，已通过配置、Adapter 或 fail-fast 隔离，没有猜测硬编码。此结论不表示机器人已经接入 Yandex。
+**Gate 5（2026-08-13）：CONDITIONAL PASS。** Phase 5 本地机器人接口适配与生命周期修复已完成，68 项 core/mock tests 和 10 项 Phase 2 PoC regression 通过。该 Gate 当时保留的真实环境条件现由 Phase 8 分项验证；build/install、真实消息 import、厂家 output metadata 和 speaker 实际出声已有后续证据，Yandex launch/runtime、speaker 内部转换、真实 arecord 打开、嘴型/shutdown flush 和厂家 `session_active` 精确时序仍为 **UNKNOWN / DEFERRED / CONDITIONAL**。此结论不表示机器人已经接入 Yandex。
 
 ### Phase 6 — 测试（COMPLETE）
 
@@ -405,7 +406,7 @@ ROS2 Node
 
 ### Phase 7 — 部署设计
 
-**状态：COMPLETE。Gate 7 为 CONDITIONAL PASS，Phase 8 未开始。**
+**Phase 7 收口历史状态：COMPLETE。Gate 7 为 CONDITIONAL PASS；当时 Phase 8 未开始。**
 
 用户提供的只读 SSH 记录补充确认：当前模式为 `jijia`，厂家
 `/lzdl10823/dialog_node` 由 `jijia.launch.py` 直接作为并列启动项拉起；
@@ -469,13 +470,29 @@ fail-closed guard、fake-root/fake-runner 测试和安全边界已完成复审�
 
 ### Phase 8 — 正式部署与回滚
 
+**当前状态：IN PROGRESS。Phase 8C ROBOT BUILD COMPLETE；CONTROL-PLANE
+REVALIDATION PENDING。Robot Yandex runtime、正式 switch 和正式 rollback 均未开始。**
+
+本轮任务提供的实机记录证明 Phase 8C 已完成固定源码上传、独立 venv、aiohttp
+隔离、ROS2 build 和安装产物验证。机器人缺少 ensurepip 且 apt 无可用 Candidate，
+因此采用 `venv --without-pip --system-site-packages` 加
+`pip --target <venv purelib>`；venv 的 `rclpy`、`lingze_msgs`、`aiohttp` 路径和系统
+Python 未被 aiohttp 污染均已核对。
+
+厂家首个 `/audio/dialog_play` frame 为 `24000 / 1 / pcm_s16le`，speaker 实际出声；
+嘴型和 speaker 内部转换未确认。build preflight 随后在严格 shell source ROS/ament
+setup 时遇到 `AMENT_TRACE_SETUP_FILES: unbound variable`。仓库已在共享 setup 加载层
+完成 nounset compatibility repair 并通过本地测试；新部署资产和
+`.deployment-commit` 尚未重新同步，机器人 build preflight 尚未复验。
+
 部署：
 
 - [ ] 维护窗口。
 - [ ] 远程恢复路径。
-- [ ] 上传代码。
-- [ ] 最小依赖。
-- [ ] 构建。
+- [x] 上传固定 commit 源码（已部署基线 `54962929981bad8a5aefeb5c9da13d0bbc830666`；repair 后版本待重新同步）。
+- [x] 独立 venv 与最小 aiohttp 隔离。
+- [x] ROS2 build 和安装产物验证。
+- [ ] 同步 repair 后完整部署资产并重新运行 build preflight。
 - [ ] 停原对话服务。
 - [ ] 启 Yandex 服务。
 - [ ] ROS graph 检查。
@@ -569,7 +586,7 @@ Codex 每次任务必须：
 ## 10. 当前状态
 
 ```text
-Current Phase: Phase 7 — COMPLETE
+Current Phase: Phase 8 — IN PROGRESS
 Gate 1: CONDITIONAL PASS
 Gate 2: PASS
 Gate 3: CONDITIONAL PASS
@@ -579,18 +596,22 @@ Phase 6: COMPLETE
 Gate 6: PASS
 Phase 7: COMPLETE
 Gate 7: CONDITIONAL PASS
-Phase 8: NOT STARTED
-Remote robot changes: NONE
+Phase 8: IN PROGRESS
+Phase 8C: ROBOT BUILD COMPLETE; CONTROL-PLANE REVALIDATION PENDING
+Robot Yandex runtime: NOT STARTED
+Formal switch: NOT STARTED
+Formal rollback: NOT STARTED
+Remote robot changes in this repair: NONE
 Remote SSH required now: NO
 Vendor source available: NO
 Yandex production protocol verified: LOCAL ROUTE A CORE PATH VERIFIED WITH speech-realtime-260528
 Local Yandex PoC: COMPLETE
-ROS2 compatibility node: LOCAL SKELETON COMPLETE; ROS2 RUNTIME NOT RUN
-Robot runtime snapshot: PHASE 4 READ-ONLY EVIDENCE FROZEN
+ROS2 compatibility node: ROBOT BUILD/INSTALL VERIFIED; YANDEX RUNTIME NOT STARTED
+Robot runtime snapshot: PHASE 4 EVIDENCE FROZEN; PHASE 8 FIELD EVIDENCE RECORDED
 Robot adaptation: PHASE 5 COMPLETE; LOCAL ADAPTER IMPLEMENTATION COMPLETE
 Systematic testing: PHASE 6 COMPLETE; GATE 6 PASS
 Deployment design: PHASE 7 COMPLETE; LOCAL CONTROL PLANE IMPLEMENTED
-Robot deployment: NOT STARTED
+Robot deployment: PHASE 8C BUILD COMPLETE; CONTROL-PLANE REVALIDATION PENDING
 ```
 
 ### 当前阶段边界
@@ -600,13 +621,19 @@ Phase 6 — COMPLETE
 Gate 6 — PASS
 Phase 7 — COMPLETE
 Gate 7 — CONDITIONAL PASS
-Phase 8 — NOT STARTED
+Phase 8 — IN PROGRESS
+Phase 8C — ROBOT BUILD COMPLETE; CONTROL-PLANE REVALIDATION PENDING
+Robot Yandex runtime — NOT STARTED
+Formal switch — NOT STARTED
+Formal rollback — NOT STARTED
 ```
 
 Phase 6 本地系统测试与 Gate 修复已完成并通过复审，Gate 6 正式为
 `PASS`。Phase 7 本地部署设计和控制工具已经完成复审，Gate 7 为
-`CONDITIONAL PASS`；没有部署或机器人修改。全部条件继续留在尚未开始的 Phase 8，
-不得自动进入。
+`CONDITIONAL PASS`。Phase 8 已进入实机部署，Phase 8C 已完成源码、隔离环境和
+build/install 验证；当前仓库 repair 尚待重新同步和机器人 build preflight 复验。
+Yandex runtime、正式 switch/rollback 和 Gate 8 均未开始或判定，不得自动进入
+Phase 8D。
 
 ## 11. Decision Log
 
@@ -643,4 +670,5 @@ Phase 6 本地系统测试与 Gate 修复已完成并通过复审，Gate 6 正�
 - **D-031**：Yandex 使用 `/opt/casbot-yandex-realtime` 独立 workspace 和 `venv --system-site-packages`；aiohttp 只进入独立 venv，复用系统/vendor rclpy 与 `lingze_msgs`，不覆盖 `/lingze/src` 或 `/lingze/install`。
 - **D-032**：常规 rollback 停止 Yandex、删除 marker、重启厂家主 service 并验证 `VENDOR_MODE`，保留 gate patch；只有完整卸载才在 backup/current SHA 均匹配时 byte-identical restore 厂家 launch。Phase 7 只生成并本地测试这些工具，不执行机器人 apply。
 - **D-033**：`/lingze/config/user_config.json` 是部署控制面的强制 fail-closed 输入。service/switch/rollback preflight、全部 verify 和 launch wrapper 每次重新读取；缺失、损坏、字段为空或 `robot_current_mode != jijia` 时禁止正式切换/Yandex 启动。`current_llm` 只允许 `lingze_omni_s2s`/`lingze_s2s`。长时检查比较起止 bytes SHA；解除 marker 在删除前、删除后和厂家 restart 紧邻前重复验证，漂移时原子恢复 marker。自动回滚遇到模式漂移时停止 Yandex、保留 marker 且不重启厂家 dialog，直到配置重新满足 guard。
-- **D-034**：Phase 7 最终决策为独立 Yandex service 配合 vendor marker gate；正式切换和 Yandex 启动必须通过 `jijia` + 已知厂家 backend 的 fail-closed guard。若切换过程中配置漂移，则停止 Yandex、保留 marker，且不自动恢复未知模式。Phase 7 为 `COMPLETE`，Gate 7 为 `CONDITIONAL PASS`；`PcmAudioFrame.format`、厂家实际发布 rate/channels、speaker 输入兼容性、`hw:0,0` 实际采集、speaker/嘴型/flush、`session_active` 精确时序、真实 Yandex 网络和凭据、正式 switch/rollback 均保留为 Phase 8 实机验证项，不得视为已验证。Phase 8 尚未开始。
+- **D-034**：Phase 7 最终决策为独立 Yandex service 配合 vendor marker gate；正式切换和 Yandex 启动必须通过 `jijia` + 已知厂家 backend 的 fail-closed guard。若切换过程中配置漂移，则停止 Yandex、保留 marker，且不自动恢复未知模式。Phase 7 为 `COMPLETE`，Gate 7 为 `CONDITIONAL PASS`；`PcmAudioFrame.format`、厂家实际发布 rate/channels、speaker 输入兼容性、`hw:0,0` 实际采集、speaker/嘴型/flush、`session_active` 精确时序、真实 Yandex 网络和凭据、正式 switch/rollback 均保留为 Phase 8 实机验证项，不得视为已验证。Phase 7 收口时 Phase 8 尚未开始。
+- **D-035**：Phase 8 已进入 `IN PROGRESS`。用户提供的 Phase 8C 实机记录证明固定基线源码、独立 venv、aiohttp purelib 隔离、ROS2 build/install 已完成；厂家 output metadata 为 `24000 / 1 / pcm_s16le` 且 speaker 实际出声，嘴型未确认。ensurepip 缺失时采用 `--without-pip --system-site-packages` 加 `pip --target <venv purelib>`，并验证系统 Python 无 aiohttp。build preflight 暴露 strict wrapper 与外部 ROS/ament setup 的 nounset 兼容问题；决策是在 `deploy/lib/casbot-runtime-env` 统一 helper 中仅围绕当前-shell source 临时关闭 nounset、保留环境副作用、传播错误并恢复原 option，所有共享控制入口和独立 launch 均复用该抽象，不硬编码 AMENT 变量。仓库 repair 已通过本地测试；机器人新版本同步和 build preflight 复验仍 pending。厂家 launch、marker、service、dialog 未切换或修改，Robot Yandex runtime、真实凭据/连接、正式 switch/rollback、Gate 8 均未开始；不进入 Phase 8D。

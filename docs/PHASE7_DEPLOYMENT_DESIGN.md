@@ -1,9 +1,10 @@
 # Phase 7 Deployment Design
 
-> 更新日期：2026-08-14
+> Phase 7 设计收口日期：2026-08-14
 > Phase 7：COMPLETE
 > Gate 7：CONDITIONAL PASS
-> Phase 8：NOT STARTED
+> Phase 7 收口时 Phase 8：NOT STARTED（历史状态）
+> 当前：Phase 8 IN PROGRESS；Phase 8C ROBOT BUILD COMPLETE；CONTROL-PLANE REVALIDATION PENDING
 
 ## 1. 目标与非目标
 
@@ -433,3 +434,46 @@ ROS2、metadata、speaker/mic、凭据、Yandex 和机器人切换/回滚事实�
 本 Phase 仅在本地仓库和临时目录工作。没有 SSH、机器人写操作、真实 systemd
 操作、真实 ROS graph/mic 操作、真实 Yandex 调用、真实密钥、Authorization 输出或
 真实音频保存。Phase 8 未开始。
+
+## 24. Phase 8 field-discovered repair note（2026-08-16）
+
+本节只追加用户提供的 Phase 8 实机事实和本地仓库修复，不改写 Phase 7 当时的
+设计、测试数量或 Gate 结论。
+
+**Phase 8 实机事实（由本轮任务提供）：**
+
+- Phase 8C 已完成固定源码上传、独立 venv、aiohttp 隔离、ROS2 build 和安装产物
+  验证；Yandex runtime 尚未启动。
+- 厂家首个 `/audio/dialog_play` frame metadata 为 `sample_rate=24000`、
+  `channels=1`、`format=pcm_s16le`；speaker 实际出声已确认，嘴型未确认。
+- 机器人标准 `venv` 因 ensurepip 缺失不可用；现场采用
+  `python3 -m venv --without-pip --system-site-packages`，再以系统 pip 仅作为安装器，
+  通过 `pip --target <venv purelib>` 安装 aiohttp。venv 中的 `rclpy`、
+  `lingze_msgs`、`aiohttp` 导入路径已核对，系统 Python 仍无法导入 aiohttp。
+- build preflight 在严格 shell 中 source `/opt/tros/humble/setup.bash` 时，因外部
+  ament setup 读取未定义的 `AMENT_TRACE_SETUP_FILES` 而触发 `unbound variable`。
+  A/B 复核证明临时关闭 nounset 后 setup 可正常加载；这不是 Yandex、ROS package
+  或 colcon build 失败。
+
+仓库的 Phase 8C repair 在共享 runtime loader 中集中定义安全 source helper：只在
+source 外部 setup 的动态范围内放宽 nounset，在当前 shell 保留环境副作用，传播
+setup 的返回码和 stderr，并恢复调用者原 nounset 状态。preflight、switch、rollback、
+verify、metadata probe 通过共享 loader 获得修复；独立 launch path 也复用同一 helper。
+仓库修复已通过本地测试，但新部署资产尚未重新同步，机器人 build preflight 尚未
+复验。
+
+当前边界为：
+
+```text
+Phase 7 — COMPLETE
+Gate 7 — CONDITIONAL PASS
+Phase 8 — IN PROGRESS
+Phase 8C — ROBOT BUILD COMPLETE; CONTROL-PLANE REVALIDATION PENDING
+Robot Yandex runtime — NOT STARTED
+Formal switch — NOT STARTED
+Formal rollback — NOT STARTED
+```
+
+厂家 launch、marker、service 和 dialog 未被切换或修改。`hw:0,0` 实际打开、嘴型、
+flush、`session_active` 精确时序、真实 Yandex 凭据/连接及正式 switch/rollback 仍待
+后续单独授权验证；本轮不进入 Phase 8D。

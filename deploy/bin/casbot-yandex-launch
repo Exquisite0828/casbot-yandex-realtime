@@ -2,6 +2,8 @@
 set -euo pipefail
 
 deploy_dir="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=../lib/casbot-runtime-env
+source "$deploy_dir/lib/casbot-runtime-env"
 deployment_root="/"
 if [[ "${1:-}" == "--root" ]]; then
   if [[ -z "${2:-}" ]]; then
@@ -63,17 +65,17 @@ if [[ ! -x "$project_executable" ]]; then
 fi
 
 # shellcheck disable=SC1090
-source "$selected_ros_setup"
+casbot_source_setup_file "$selected_ros_setup"
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export FASTRTPS_DEFAULT_PROFILES_FILE="$fastdds_profile"
 export RMW_FASTRTPS_USE_QOS_FROM_XML=1
 export ROS_DISABLE_LOANED_MESSAGES=0
 # shellcheck disable=SC1090
-source "$vendor_setup"
+casbot_source_setup_file "$vendor_setup"
 # shellcheck disable=SC1090
-source "$venv_activate"
+casbot_source_setup_file "$venv_activate"
 # shellcheck disable=SC1090
-source "$project_setup"
+casbot_source_setup_file "$project_setup"
 
 config_namespace="$(
   PYTHONPATH="$deploy_dir/lib${PYTHONPATH:+:$PYTHONPATH}" \

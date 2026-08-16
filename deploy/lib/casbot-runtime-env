@@ -1,6 +1,30 @@
 #!/usr/bin/env bash
 # Shared ROS/vendor/venv environment loader for deployment control commands.
 
+casbot_source_setup_file() {
+  local casbot_setup_file="$1"
+  local casbot_nounset_was_on=0
+  local casbot_source_rc=0
+
+  case "$-" in
+    *u*) casbot_nounset_was_on=1 ;;
+  esac
+
+  set +u
+  if source "$casbot_setup_file"; then
+    casbot_source_rc=0
+  else
+    casbot_source_rc=$?
+  fi
+
+  if (( casbot_nounset_was_on )); then
+    set -u
+  else
+    set +u
+  fi
+  return "$casbot_source_rc"
+}
+
 casbot_source_runtime() {
   local deployment_root="/"
   local arguments=("$@")
@@ -50,10 +74,10 @@ casbot_source_runtime() {
 
   if [[ -f "$tros_setup" ]]; then
     # shellcheck disable=SC1090
-    source "$tros_setup"
+    casbot_source_setup_file "$tros_setup"
   elif [[ -f "$ros_setup" ]]; then
     # shellcheck disable=SC1090
-    source "$ros_setup"
+    casbot_source_setup_file "$ros_setup"
   fi
   export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
   export FASTRTPS_DEFAULT_PROFILES_FILE="$fastdds_profile"
@@ -61,15 +85,15 @@ casbot_source_runtime() {
   export ROS_DISABLE_LOANED_MESSAGES=0
   if [[ -f "$vendor_setup" ]]; then
     # shellcheck disable=SC1090
-    source "$vendor_setup"
+    casbot_source_setup_file "$vendor_setup"
   fi
   if [[ -f "$venv_activate" ]]; then
     # shellcheck disable=SC1090
-    source "$venv_activate"
+    casbot_source_setup_file "$venv_activate"
   fi
   if [[ -f "$project_setup" ]]; then
     # shellcheck disable=SC1090
-    source "$project_setup"
+    casbot_source_setup_file "$project_setup"
   fi
   if [[ -x "$venv_python" ]]; then
     CASBOT_DEPLOY_PYTHON="$venv_python"

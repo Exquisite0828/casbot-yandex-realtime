@@ -400,3 +400,68 @@ channels 事实。
 
 本补充证据采集没有机器人修改；本轮也没有 SSH、systemd 操作、marker 创建、
 上传、安装、进程停止或真实 Yandex 调用。
+
+## Phase 8C field evidence and gate repair boundary（2026-08-16）
+
+本节是本轮任务提供的 Phase 8 实机记录，不改写 Phase 4 冻结证据或 Phase 7
+只读记录。本轮 Codex 没有 SSH、访问机器人或执行远程操作。
+
+**VERIFIED BY USER-PROVIDED PHASE 8 FIELD RECORD：**
+
+```text
+host: xiaoling0040
+architecture: aarch64
+Python: 3.10.12
+ROS2: Humble
+robot_current_mode: jijia
+current_llm: lingze_omni_s2s
+namespace: lzdl10823
+
+deployed source commit: 54962929981bad8a5aefeb5c9da13d0bbc830666
+independent venv: CREATED
+aiohttp isolated to venv purelib: VERIFIED
+ROS2 build and installed executable: VERIFIED
+Robot Yandex runtime: NOT STARTED
+```
+
+机器人没有 ensurepip，apt 也没有可用 Candidate。已验证的受控 fallback 是：
+
+```text
+python3 -m venv --without-pip --system-site-packages <venv>
+system pip used only as installer
+pip --target <venv purelib> aiohttp
+```
+
+验证结果为 venv Python 可导入 `rclpy`、`lingze_msgs` 和 venv purelib 中的
+`aiohttp`，系统 Python 仍无法导入 aiohttp。该事实不构成修改 apt 源或污染系统
+Python 的许可。
+
+厂家首个 `/lzdl10823/audio/dialog_play` frame 的实际 metadata 为：
+
+```text
+sample_rate: 24000
+channels: 1
+format: pcm_s16le
+```
+
+此 frame 已由 speaker 实际播放出声，因此仅能确认 speaker 接受该实际 tuple 并播放；
+嘴型未确认，speaker 是否内部重采样或进行 mono/stereo 转换也未确认。
+
+build preflight 的实际阻塞调用链为：
+
+```text
+strict deployment wrapper (set -u)
+→ source /opt/tros/humble/setup.bash
+→ external ament setup reads unset AMENT_TRACE_SETUP_FILES
+→ unbound variable
+```
+
+A/B 结果为 nounset 开启时失败、在 source 的动态范围临时关闭 nounset 时 setup
+成功。因此根因是部署 shell 与外部 ROS/ament setup 的 option 兼容性，不是 Yandex、
+ROS package 或 colcon build 失败。仓库已在共享 setup 加载层完成修复并通过本地
+回归；机器人尚未同步新版本，build preflight 尚未复验。
+
+现场安全状态保持：厂家 launch 未修改，gate 未 apply，marker 不存在，service 未
+重启，厂家 dialog 未停止，Yandex dialog 未启动，没有真实 Yandex 凭据或连接。
+`hw:0,0` 尚未在厂家 dialog 退出后实际打开；嘴型、flush、`session_active` 精确时序、
+真实 Yandex 和正式 switch/rollback 仍未验证。
