@@ -27,9 +27,13 @@ Gate 6 — PASS
 Phase 7 — COMPLETE
 Gate 7 — CONDITIONAL PASS
 Phase 8 — IN PROGRESS
-Phase 8C — ROBOT BUILD COMPLETE; CONTROL-PLANE REVALIDATION PENDING
-Robot Yandex runtime — NOT STARTED
-Formal switch — NOT STARTED
+Phase 8C — COMPLETE
+Phase 8D — CONFIG/CREDENTIAL PREPARATION COMPLETE
+Phase 8E — SYSTEMD UNIT INSTALLED; DISABLED/INACTIVE
+Phase 8F — FIRST SWITCH ATTEMPT FAILED; VENDOR MODE RESTORED
+Phase 8F repository repair — COMPLETE LOCALLY; ROBOT RESYNC/SECOND SWITCH PENDING
+Robot Yandex session probe — PASS; replacement ROS2 node takeover NOT PROVEN
+Formal switch — NOT COMPLETE
 Formal rollback — NOT STARTED
 ```
 
@@ -49,9 +53,28 @@ Phase 6 已完成并通过 Gate 6 本地软件测试复审。测试通过构造�
 
 Phase 7 已取得用户提供的只读启动链补充证据：当前 `jijia.launch.py` 直接启动厂家 dialog，且 dialog 与 speaker/Web/运动等是并列项；停止整个 `lingze_robot.service` 会停止全部厂家 ROS2 进程组，因此部署路线冻结为“厂家 launch marker gate + 独立 Yandex workspace/venv/systemd service”。本地已实现默认 dry-run 的 gate、preflight、verify、switch、rollback 和 metadata probe。Phase 7 已 **COMPLETE**，Gate 7 为 **CONDITIONAL PASS**；其收口时尚未部署、未禁用厂家节点。
 
-Phase 8 已进入 **IN PROGRESS**。根据本轮任务提供的 Phase 8 实机记录，Phase 8C 已完成固定源码上传、独立 venv、aiohttp 隔离、ROS2 build 和安装产物验证；厂家首个 `/audio/dialog_play` frame 为 `24000 Hz / 1 channel / pcm_s16le`，并已确认 speaker 实际出声，嘴型尚未确认。机器人缺少 ensurepip，现场采用 `venv --without-pip --system-site-packages` 配合 `pip --target` 写入 venv purelib，验证 venv 可导入 `rclpy`、`lingze_msgs`、`aiohttp` 且系统 Python 仍无 aiohttp。
+Phase 8 已进入 **IN PROGRESS**。根据任务提供的实机记录，Phase 8C build/preflight、
+Phase 8D 配置/凭据准备和 Phase 8E disabled/inactive systemd unit 安装已经完成；vendor
+gate 为 `PATCHED`，当前 marker absent。机器人到真实 Yandex 的 WebSocket/session
+探测通过，但这不等于替换 ROS2 节点已经接管机器人。厂家首个
+`/audio/dialog_play` frame 为 `24000 Hz / 1 channel / pcm_s16le`，speaker 实际出声，
+嘴型尚未确认。
 
-build preflight 随后发现严格 shell 在 source ROS/ament setup 时触发 `AMENT_TRACE_SETUP_FILES: unbound variable`。仓库已在共享 setup 加载层完成 nounset 兼容修复并通过本地回归；新版本尚未重新同步到机器人，机器人 build preflight 尚未复验。厂家 launch、marker、service 和 dialog 未被切换或修改，Yandex runtime、真实凭据/连接、正式 switch/rollback 均未开始。`hw:0,0` 实际打开、嘴型/flush、厂家 `session_active` 精确时序和 speaker 转换行为仍为 **UNKNOWN / DEFERRED / CONDITIONAL**。详见 `docs/PHASE7_DEPLOYMENT_DESIGN.md`、`docs/RUNTIME_SNAPSHOT.md` 和 `deploy/README.md`。
+第一次 Phase 8F 正式 switch 在 Yandex service 启动前的 transition verify 失败；
+Yandex journal 无记录。旧版本立即执行的 automatic rollback vendor-mode verify 也
+返回失败，但稍后的完整 vendor-mode verify 全部 PASS，且 marker absent、厂家 service
+active、Yandex service inactive，机器人安全恢复厂家模式。旧版本没有保存第一次
+transition 的具体失败 CheckReport，因此该失败项仍为 **UNKNOWN**；readiness/settling
+race 只是当前最强工程推断，厂家 watchdog/反第三方机制既未被证明存在，也未被证明
+不存在。
+
+仓库已完成 Phase 8F 本地 Gate Repair：transition、service、Yandex mode、automatic
+rollback 和正常 rollback 共享有界 readiness polling，区分 overall deadline 与单次
+probe timeout，要求连续稳定 PASS，保留最后完整报告，并按最终 marker/service/process
+状态生成恢复指引。修复版本尚未重新同步机器人，第二次 switch 尚未执行；Phase 8
+和 Gate 8 均未完成。`hw:0,0` 实际打开、嘴型/flush、厂家 `session_active` 精确时序和
+speaker 转换行为仍为 **UNKNOWN / DEFERRED / CONDITIONAL**。详见
+`docs/PHASE8_FIELD_DEPLOYMENT.md`、`docs/RUNTIME_SNAPSHOT.md` 和 `deploy/README.md`。
 
 ## Key documents
 
@@ -62,6 +85,7 @@ docs/YANDEX_REALTIME_VERIFIED.md
 docs/YANDEX_REALTIME_LOCAL_POC.md
 docs/PHASE6_SYSTEMATIC_TESTING.md
 docs/PHASE7_DEPLOYMENT_DESIGN.md
+docs/PHASE8_FIELD_DEPLOYMENT.md
 docs/ROS2_COMPATIBILITY_SKELETON.md
 docs/RUNTIME_SNAPSHOT.md
 docs/vendor/二开文档.md

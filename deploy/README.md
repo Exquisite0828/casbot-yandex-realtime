@@ -3,8 +3,11 @@
 > Phase 7 — COMPLETE
 > Gate 7 — CONDITIONAL PASS
 > Phase 8 — IN PROGRESS
-> Phase 8C — ROBOT BUILD COMPLETE; CONTROL-PLANE REVALIDATION PENDING
-> Robot Yandex runtime / formal switch / formal rollback — NOT STARTED
+> Phase 8C — COMPLETE
+> Phase 8D — CONFIG/CREDENTIAL PREPARATION COMPLETE
+> Phase 8E — SYSTEMD UNIT INSTALLED; DISABLED/INACTIVE
+> Phase 8F — FIRST SWITCH ATTEMPT FAILED; VENDOR MODE RESTORED
+> Phase 8F repair — COMPLETE LOCALLY; ROBOT RESYNC/SECOND SWITCH PENDING
 > All write commands are dry-run unless `--apply` is supplied.
 > This repository repair did not access or modify the robot.
 
@@ -75,9 +78,9 @@ effects, propagates the setup return code and stderr, then restores the caller's
 original nounset state. Do not replace this with a subshell, a hardcoded
 `AMENT_TRACE_SETUP_FILES` value, or a wrapper-wide `set +u`.
 
-The repository repair has passed local regression only. The complete deployment
-assets still need to be synchronized from one fixed commit and build preflight
-must be rerun on the robot before any transition or Yandex service start.
+The nounset repair was subsequently field-validated by a passing build preflight.
+The newer Phase 8F readiness repair has passed local regression only and must be
+synchronized from one reviewed fixed commit before another switch.
 
 ## Vendor launch gate
 
@@ -196,12 +199,35 @@ Phase 8 apply requires both flags:
 deploy/bin/casbot-yandex-switch --apply --maintenance-window
 ```
 
-Order: preflight → stop Yandex → create marker → restart vendor main → verify
-transition → service preflight → start Yandex → verify yandex-mode. Any hard failure after marker
-creation triggers one bounded automatic rollback. The marker is removed and the
-vendor is restarted only after the Yandex executable is proven absent; otherwise
-the marker is retained to prevent two dialogs. A restored vendor mode still returns
-switch failure so the original failure remains visible.
+Readiness timing can be made explicit:
+
+```bash
+deploy/bin/casbot-yandex-switch --apply --maintenance-window \
+  --timeout 60 --probe-timeout 5 --poll-interval 0.5 --stable-passes 2
+```
+
+`--timeout` is the overall deadline for each readiness stage (default 30 s).
+`--probe-timeout` bounds one service/process/ROS snapshot (default: the smaller
+of 5 s or half the stage timeout, and always less than the stage timeout).
+`--poll-interval` defaults to 0.5 s. Transition, Yandex mode and vendor mode
+default to two consecutive complete PASS reports; service preflight needs one
+complete PASS. A new probe is not started unless its full timeout fits inside
+the remaining stage deadline.
+
+Order: preflight → stop Yandex → create marker → restart vendor main → bounded
+transition readiness → bounded service preflight → start Yandex → bounded
+yandex-mode readiness. Only explicit settling states are retried: expected
+process/node appearance or exit, graph convergence, speaker discovery, microphone
+release and Yandex MainPID ownership. Marker/gate/config/credential contradictions,
+robot mode drift, dual dialogs, unknown process safety, a vendor dialog in Yandex
+mode, and command failures are hard failures. Any hard failure or readiness timeout
+after marker creation triggers one bounded automatic rollback.
+
+The marker is removed and the vendor is restarted only after the Yandex executable
+is proven absent. Automatic rollback also polls vendor-mode to its deadline and
+returns success when a transient early failure settles to stable PASS. A restored
+vendor mode still returns switch failure so the original failure remains visible.
+Every readiness failure includes the complete last safe `CheckReport`.
 
 If `robot_current_mode` changes after marker creation, switching stops. Automatic
 recovery stops Yandex if necessary, then retains the marker and does not restart
@@ -226,12 +252,19 @@ Phase 8 apply:
 deploy/bin/casbot-yandex-rollback --apply --maintenance-window
 ```
 
-Order: rollback preflight → stop Yandex → verify transition → remove marker → restart vendor main →
-verify vendor-mode. An already verified vendor mode is idempotent and does not
-restart again.
+Rollback accepts the same `--timeout`, `--probe-timeout`, `--poll-interval` and
+`--stable-passes` controls as switch.
+
+Order: rollback preflight → stop Yandex → bounded transition readiness → remove
+marker → restart vendor main → bounded vendor-mode readiness. An already verified
+vendor mode is idempotent and does not restart again.
 
 On any CRITICAL recovery path, prove every matching Yandex dialog PID is absent
-before removing the marker or restarting the vendor. Otherwise retain the marker.
+before removing the marker or restarting the vendor. The controller then samples
+the actual final marker, both service states and both process families. Guidance
+is derived from that snapshot: retain a marker only when one is present; if it is
+absent while Yandex absence is unproven, restore safe gating before any vendor
+restart. Vendor mode is never claimed restored without a passing verifier report.
 The same recovery must also prove `robot_current_mode=jijia` and a supported
 `current_llm`; invalid or changing robot configuration is never treated as safe
 permission to ungate the vendor dialog.
@@ -248,6 +281,20 @@ the retained vendor main service, but does not conflict with it. It has
 For the first Phase 8 validation, do not enable the service. Install the unit,
 reload systemd, and use a manual start only after preflight and transition
 verification. Enabling is a separate post-acceptance decision.
+
+## Phase 8F field boundary
+
+The first formal switch failed in transition verification before Yandex service
+start; the later Yandex journal had no entries. The old automatic rollback's
+immediate vendor-mode verification failed, but a later complete vendor-mode
+report passed with marker absent, vendor service active and Yandex service
+inactive. The exact historical transition failure was not retained and remains
+UNKNOWN. A settling race is the leading inference, not a proven diagnosis;
+vendor watchdog or anti-third-party behavior is not proven either way.
+
+The readiness repair in this repository has not been synchronized to the robot,
+and the second switch has not been executed. See
+`docs/PHASE8_FIELD_DEPLOYMENT.md` for the evidence boundary.
 
 ## Complete uninstall
 

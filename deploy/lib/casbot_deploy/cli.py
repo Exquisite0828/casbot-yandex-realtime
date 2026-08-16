@@ -103,15 +103,22 @@ def switch_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--maintenance-window", action="store_true")
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--probe-timeout", type=float)
+    parser.add_argument("--poll-interval", type=float, default=0.5)
+    parser.add_argument("--stable-passes", type=int, default=2)
     arguments = parser.parse_args(argv)
     try:
         result = SwitchController(
-            _paths(arguments.root), timeout=arguments.timeout
+            _paths(arguments.root),
+            timeout=arguments.timeout,
+            probe_timeout=arguments.probe_timeout,
+            poll_interval=arguments.poll_interval,
+            stable_passes=arguments.stable_passes,
         ).run(
             apply=arguments.apply,
             maintenance_window=arguments.maintenance_window,
         )
-    except (DeploymentError, OSError) as error:
+    except (DeploymentError, OSError, ValueError) as error:
         return _print_error(error)
     print(result.message)
     if result.success and result.changed:
@@ -129,15 +136,22 @@ def rollback_main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--maintenance-window", action="store_true")
     parser.add_argument("--timeout", type=float, default=30.0)
+    parser.add_argument("--probe-timeout", type=float)
+    parser.add_argument("--poll-interval", type=float, default=0.5)
+    parser.add_argument("--stable-passes", type=int, default=2)
     arguments = parser.parse_args(argv)
     try:
         result = RollbackController(
-            _paths(arguments.root), timeout=arguments.timeout
+            _paths(arguments.root),
+            timeout=arguments.timeout,
+            probe_timeout=arguments.probe_timeout,
+            poll_interval=arguments.poll_interval,
+            stable_passes=arguments.stable_passes,
         ).run(
             apply=arguments.apply,
             maintenance_window=arguments.maintenance_window,
         )
-    except (DeploymentError, OSError) as error:
+    except (DeploymentError, OSError, ValueError) as error:
         return _print_error(error)
     print(result.message)
     if result.success and result.changed:

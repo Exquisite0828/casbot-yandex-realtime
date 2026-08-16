@@ -63,8 +63,14 @@ class CheckReport:
     checks: tuple[CheckResult, ...]
 
     @property
+    def failures(self) -> tuple[CheckResult, ...]:
+        return tuple(
+            check for check in self.checks if check.status is CheckStatus.FAIL
+        )
+
+    @property
     def ok(self) -> bool:
-        return all(check.status is not CheckStatus.FAIL for check in self.checks)
+        return not self.failures
 
     def by_name(self, name: str) -> CheckResult:
         for check in self.checks:
@@ -395,18 +401,22 @@ class _StateReader:
             return None
         return config.namespace if ROS_TOKEN.fullmatch(config.namespace) else None
 
-    def yandex_process_owned(self) -> bool:
+    def yandex_process_owned(self) -> bool | None:
         try:
             result = self.runner.run(
                 ["systemctl", "show", "-p", "MainPID", "--value", YANDEX_SERVICE],
                 timeout=self.timeout,
             )
         except (OSError, subprocess.SubprocessError):
-            return False
+            return None
         pid = result.stdout.strip()
-        if result.returncode != 0 or not pid.isdigit() or int(pid) <= 0:
+        if result.returncode != 0:
+            return None
+        if not pid.isdigit() or int(pid) <= 0:
             return False
         matching_pids = self.yandex_dialog_pids()
+        if matching_pids is None:
+            return None
         if matching_pids != {int(pid)}:
             return False
         try:
@@ -414,11 +424,12 @@ class _StateReader:
                 ["ps", "-p", pid, "-o", "args="], timeout=self.timeout
             )
         except (OSError, subprocess.SubprocessError):
-            return False
+            return None
+        if process.returncode != 0:
+            return None
         command = process.stdout
         return (
-            process.returncode == 0
-            and "/opt/casbot-yandex-realtime/" in command
+            "/opt/casbot-yandex-realtime/" in command
             and "realtime_dialog_node" in command
         )
 
@@ -856,10 +867,15 @@ class DeploymentVerifier:
                 )
             )
         if mode == "yandex-mode":
+            process_owned = self.state.yandex_process_owned()
             checks.append(
-                _pass("yandex_process_owner", "service MainPID runs project executable")
-                if self.state.yandex_process_owned()
-                else _fail("yandex_process_owner", "service process ownership not proven")
+                _expected_state(
+                    "yandex_process_owner",
+                    process_owned,
+                    True,
+                    pass_detail="service MainPID runs project executable",
+                    mismatch_detail="service process ownership not yet proven",
+                )
             )
         checks.append(inspector._robot_config_stability_check(robot_snapshot))
         return CheckReport(mode, tuple(checks))

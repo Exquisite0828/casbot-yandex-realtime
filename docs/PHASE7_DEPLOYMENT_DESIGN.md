@@ -4,7 +4,7 @@
 > Phase 7：COMPLETE
 > Gate 7：CONDITIONAL PASS
 > Phase 7 收口时 Phase 8：NOT STARTED（历史状态）
-> 当前：Phase 8 IN PROGRESS；Phase 8C ROBOT BUILD COMPLETE；CONTROL-PLANE REVALIDATION PENDING
+> 当前：Phase 8 IN PROGRESS；Phase 8F FIRST SWITCH ATTEMPT FAILED / VENDOR MODE RESTORED；本地 Gate Repair 完成，机器人重同步与第二次 switch 待执行
 
 ## 1. 目标与非目标
 
@@ -477,3 +477,39 @@ Formal rollback — NOT STARTED
 厂家 launch、marker、service 和 dialog 未被切换或修改。`hw:0,0` 实际打开、嘴型、
 flush、`session_active` 精确时序、真实 Yandex 凭据/连接及正式 switch/rollback 仍待
 后续单独授权验证；本轮不进入 Phase 8D。
+
+## 25. Phase 8F switch-readiness repair note（2026-08-17）
+
+本节只追加任务提供的 Phase 8 实机事实及其引出的本地控制面修复；第 22 节仍是
+Phase 7 收口时的历史 Gate 结论。
+
+Phase 8C 已完成并通过 build preflight，Phase 8D 配置/凭据准备完成，Phase 8E
+systemd unit 已安装且保持 disabled/inactive；vendor gate 为 `PATCHED`。真实机器人到
+Yandex WebSocket/session 的独立探测 PASS，但不证明替换 ROS2 dialog 已接管机器人。
+
+第一次 Phase 8F switch 在 transition verify 失败，发生在 Yandex service start 前，
+且 Yandex journal 无记录。automatic rollback 的立即 vendor-mode verify 返回失败；
+稍后 marker absent、vendor service active、Yandex service inactive，完整 vendor-mode
+verify PASS，机器人安全恢复厂家模式。旧控制面没有保留 transition 的失败
+`CheckReport`，所以具体失败项为 **UNKNOWN**。readiness/settling race 是最强推断而非
+已验证根因；没有证据证明厂家 watchdog 或反第三方机制存在或不存在。
+
+Phase 8F 仓库修复将 transition、service preflight、Yandex mode、automatic rollback
+和正常 rollback 纳入同一有界 readiness polling：阶段 deadline 与单 probe timeout
+分离，动态收敛项才重试，配置漂移/互斥冲突/未知安全态立即失败，目标模式默认需要
+两次连续完整 PASS；失败保留完整 last report，并依据最终 marker、两服务和两类进程
+状态生成恢复指引。修复尚未同步机器人，第二次 switch 尚未执行。当前状态为：
+
+```text
+Phase 7 — COMPLETE
+Gate 7 — CONDITIONAL PASS
+Phase 8 — IN PROGRESS
+Phase 8C — COMPLETE
+Phase 8D — CONFIG/CREDENTIAL PREPARATION COMPLETE
+Phase 8E — SYSTEMD UNIT INSTALLED; DISABLED/INACTIVE
+Phase 8F — FIRST SWITCH ATTEMPT FAILED; VENDOR MODE RESTORED
+Phase 8F repository repair — COMPLETE LOCALLY; ROBOT RESYNC/SECOND SWITCH PENDING
+```
+
+详见 `docs/PHASE8_FIELD_DEPLOYMENT.md`。本轮没有 SSH、机器人操作、真实 Yandex
+调用或凭据读取，也没有执行第二次切换。

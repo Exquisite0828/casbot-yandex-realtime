@@ -465,3 +465,43 @@ ROS package 或 colcon build 失败。仓库已在共享 setup 加载层完成�
 重启，厂家 dialog 未停止，Yandex dialog 未启动，没有真实 Yandex 凭据或连接。
 `hw:0,0` 尚未在厂家 dialog 退出后实际打开；嘴型、flush、`session_active` 精确时序、
 真实 Yandex 和正式 switch/rollback 仍未验证。
+
+## Phase 8D–8F field evidence and readiness repair boundary（2026-08-17）
+
+本节继续使用任务提供的维护窗口记录；本轮 Codex 没有重新 SSH、读取真实 env、
+运行远程命令或操作机器人。
+
+**VERIFIED BY USER-PROVIDED PHASE 8 FIELD RECORD：**
+
+```text
+Phase 8C: COMPLETE; build preflight PASS
+Phase 8D: CONFIG/CREDENTIAL PREPARATION COMPLETE
+Phase 8E: systemd unit installed; disabled/inactive
+vendor gate: PATCHED
+marker after recovery: ABSENT
+real robot-to-Yandex WebSocket/session probe: PASS
+```
+
+生产 YAML 和真实 `yandex.env` 已在机器人准备，后者为 root-owned mode 0600；本文及
+仓库不保存其值。真实 session probe 只证明机器人网络/session 建立，不证明 Yandex
+ROS2 dialog service 或 node 已接管机器人。
+
+第一次正式 switch 在 `transition` verify 失败，早于 Yandex service start。稍后的
+Yandex journal 为 `-- No entries --`。automatic rollback 的立即 `vendor-mode` verify
+返回失败；再晚些只读状态为 marker absent、vendor service active、Yandex service
+inactive，完整 `vendor-mode` report 全部 PASS。由此只确认稍后观察时机器人安全恢复
+厂家模式。
+
+旧控制面没有保存第一次 transition 的完整失败报告，具体历史失败项保持
+**UNKNOWN**。systemd active 与 ROS graph/process/audio readiness 之间的 settling race
+是当前最强工程推断，不是 VERIFIED root cause。现场证据既不证明厂家 watchdog/
+反第三方机制存在，也不证明其不存在。
+
+本地仓库 Phase 8F repair 引入有界 readiness polling、独立阶段/单 probe timeout、
+连续稳定 PASS、显式 transient/hard 分类、完整 last `CheckReport`，以及基于最终
+marker/service/process snapshot 的恢复指引。该修复尚未同步机器人，第二次正式
+switch 和真实正常 rollback 均未执行。详细时间线见
+`docs/PHASE8_FIELD_DEPLOYMENT.md`。
+
+继续未决：`hw:0,0` capture PASS、替换节点的 speaker/嘴型/flush、厂家
+`session_active` 精确时序、正常 rollback，以及完整机器人功能验收。

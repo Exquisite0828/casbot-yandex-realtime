@@ -225,7 +225,10 @@ class DeploymentSwitchingTest(unittest.TestCase):
         self.assertTrue(result.success, result.message)
         self.assertTrue(self.paths.marker.exists())
         self.assertEqual(self.preflight.calls, ["switch", "service"])
-        self.assertEqual(self.verifier.calls, ["transition", "yandex-mode"])
+        self.assertEqual(
+            self.verifier.calls,
+            ["transition", "transition", "yandex-mode", "yandex-mode"],
+        )
         commands = [call[0] for call in self.runner.calls]
         restart_index = commands.index(("systemctl", "restart", "lingze_robot.service"))
         start_index = commands.index(("systemctl", "start", "casbot-yandex-dialog.service"))
@@ -259,7 +262,7 @@ class DeploymentSwitchingTest(unittest.TestCase):
         self.assertFalse(result.rollback_success)
         self.assertIn("CRITICAL", result.message)
         self.assertTrue(self.paths.marker.exists())
-        self.assertEqual(self.preflight.calls, ["switch", "service", "rollback"])
+        self.assertEqual(self.preflight.calls, ["switch", "rollback"])
         commands = [call[0] for call in self.runner.calls]
         self.assertNotIn(("systemctl", "start", "casbot-yandex-dialog.service"), commands)
         self.assertEqual(
@@ -520,7 +523,10 @@ class DeploymentSwitchingTest(unittest.TestCase):
         self.assertFalse(self.paths.marker.exists())
         self.assertFalse(self.runner.yandex_service_active)
         self.assertTrue(self.runner.vendor_dialog_running)
-        self.assertEqual(self.verifier.calls, ["transition", "vendor-mode"])
+        self.assertEqual(
+            self.verifier.calls,
+            ["transition", "transition", "vendor-mode", "vendor-mode"],
+        )
         commands = [call[0] for call in self.runner.calls]
         self.assertLess(
             commands.index(("systemctl", "stop", "casbot-yandex-dialog.service")),
@@ -601,8 +607,10 @@ class DeploymentSwitchingTest(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertIn("CRITICAL", result.message)
-        self.assertIn("prove all matching Yandex dialog PIDs are absent", result.message)
-        self.assertIn("retain the marker", result.message)
+        self.assertIn("marker=absent", result.message)
+        self.assertIn("Yandex dialog absence is not proven", result.message)
+        self.assertIn("matching Yandex dialog PIDs are proven absent", result.message)
+        self.assertNotIn("retain the marker", result.message)
         self.assertFalse(
             any(
                 call[0] == ("systemctl", "restart", "lingze_robot.service")

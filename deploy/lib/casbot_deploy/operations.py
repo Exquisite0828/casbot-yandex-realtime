@@ -18,6 +18,7 @@ from .checks import (
     DeploymentInspector,
     DeploymentVerifier,
     SubprocessCommandRunner,
+    VENDOR_EXECUTABLES,
     VENDOR_SERVICE,
     YANDEX_EXECUTABLE,
     YANDEX_SERVICE,
@@ -48,6 +49,115 @@ class Verifier(Protocol):
     def verify(self, mode: str) -> CheckReport: ...
 
 
+@dataclass(frozen=True)
+class ReadinessPolicy:
+    retryable_failures: frozenset[str]
+    stable_passes: int
+
+
+READINESS_POLICIES = {
+    "transition": ReadinessPolicy(
+        frozenset(
+            {
+                "vendor_dialog",
+                "dialog_node_count",
+                "speaker_node",
+                "microphone_free",
+            }
+        ),
+        stable_passes=2,
+    ),
+    "service": ReadinessPolicy(
+        frozenset(
+            {
+                "vendor_dialog_absent",
+                "dialog_node_count",
+                "speaker_node",
+                "microphone_free",
+            }
+        ),
+        stable_passes=1,
+    ),
+    "yandex-mode": ReadinessPolicy(
+        frozenset(
+            {
+                "yandex_dialog",
+                "dialog_node_count",
+                "speaker_node",
+                "yandex_process_owner",
+            }
+        ),
+        stable_passes=2,
+    ),
+    "vendor-mode": ReadinessPolicy(
+        frozenset(
+            {
+                "vendor_dialog",
+                "dialog_node_count",
+                "speaker_node",
+            }
+        ),
+        stable_passes=2,
+    ),
+}
+
+
+class ReadinessError(DeploymentError):
+    def __init__(
+        self,
+        mode: str,
+        reason: str,
+        report: CheckReport,
+        *,
+        stable_passes: int,
+        required_stable_passes: int,
+    ) -> None:
+        self.mode = mode
+        self.reason = reason
+        self.report = report
+        self.stable_passes = stable_passes
+        self.required_stable_passes = required_stable_passes
+        super().__init__(self._render())
+
+    def _render(self) -> str:
+        return (
+            f"{self.mode} readiness {self.reason}; stable passes "
+            f"{self.stable_passes}/{self.required_stable_passes}\n"
+            f"last report:\n{self.report.render_text()}"
+        )
+
+
+@dataclass(frozen=True)
+class RecoveryState:
+    marker: str
+    vendor_service: str
+    yandex_service: str
+    vendor_dialog: str
+    yandex_dialog: str
+
+    def render(self) -> str:
+        return " ".join(
+            (
+                f"marker={self.marker}",
+                f"vendor_service={self.vendor_service}",
+                f"yandex_service={self.yandex_service}",
+                f"vendor_dialog={self.vendor_dialog}",
+                f"yandex_dialog={self.yandex_dialog}",
+            )
+        )
+
+
+def _resolve_probe_timeout(timeout: float, probe_timeout: float | None) -> float:
+    if timeout <= 0:
+        raise ValueError("timeout must be greater than zero")
+    value = min(5.0, timeout / 2.0) if probe_timeout is None else probe_timeout
+    if value <= 0:
+        raise ValueError("probe_timeout must be greater than zero")
+    if value >= timeout:
+        raise ValueError("probe_timeout must be smaller than timeout")
+    return value
+
+
 def _fsync_directory(path: Path) -> None:
     descriptor = os.open(path, os.O_RDONLY)
     try:
@@ -64,7 +174,9 @@ class _TransactionBase:
         verifier: Verifier,
         *,
         timeout: float,
+        probe_timeout: float,
         poll_interval: float,
+        stable_passes: int,
         sleeper: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -72,13 +184,81 @@ class _TransactionBase:
             raise ValueError("timeout must be greater than zero")
         if poll_interval < 0:
             raise ValueError("poll_interval must not be negative")
+        if stable_passes < 1:
+            raise ValueError("stable_passes must be at least one")
         self.paths = paths
         self.runner = runner
         self.verifier = verifier
         self.timeout = timeout
+        self.probe_timeout = probe_timeout
         self.poll_interval = poll_interval
+        self.stable_passes = stable_passes
         self._sleep = sleeper
         self._monotonic = monotonic
+
+    @staticmethod
+    def _is_hard_readiness_failure(
+        policy: ReadinessPolicy, report: CheckReport
+    ) -> bool:
+        return any(
+            check.name not in policy.retryable_failures
+            or "UNKNOWN" in check.detail.upper()
+            for check in report.failures
+        )
+
+    def _wait_for_report(
+        self,
+        mode: str,
+        probe: Callable[[str], CheckReport],
+    ) -> CheckReport:
+        policy = READINESS_POLICIES[mode]
+        required_stable_passes = (
+            policy.stable_passes if mode == "service" else self.stable_passes
+        )
+        deadline = self._monotonic() + self.timeout
+        stable_passes = 0
+        last_report: CheckReport | None = None
+        while True:
+            remaining = deadline - self._monotonic()
+            if last_report is not None and remaining < self.probe_timeout:
+                raise ReadinessError(
+                    mode,
+                    "timed out",
+                    last_report,
+                    stable_passes=stable_passes,
+                    required_stable_passes=required_stable_passes,
+                )
+            report = probe(mode)
+            last_report = report
+            if report.ok:
+                stable_passes += 1
+                if stable_passes >= required_stable_passes:
+                    return report
+            else:
+                stable_passes = 0
+                if self._is_hard_readiness_failure(policy, report):
+                    raise ReadinessError(
+                        mode,
+                        "hard failure",
+                        report,
+                        stable_passes=stable_passes,
+                        required_stable_passes=required_stable_passes,
+                    )
+            remaining = deadline - self._monotonic()
+            latest_next_probe = remaining - self.probe_timeout
+            if latest_next_probe <= 0:
+                raise ReadinessError(
+                    mode,
+                    "timed out",
+                    report,
+                    stable_passes=stable_passes,
+                    required_stable_passes=required_stable_passes,
+                )
+            interval = self.poll_interval if self.poll_interval > 0 else 0.001
+            self._sleep(min(interval, latest_next_probe))
+
+    def _wait_for_verification(self, mode: str) -> CheckReport:
+        return self._wait_for_report(mode, self.verifier.verify)
 
     def _require_apply_authority(self, maintenance_window: bool) -> None:
         if not maintenance_window:
@@ -143,7 +323,7 @@ class _TransactionBase:
 
     def _service_active(self, service: str) -> bool:
         result = self.runner.run(
-            ("systemctl", "is-active", service), timeout=self.timeout
+            ("systemctl", "is-active", service), timeout=self.probe_timeout
         )
         if result.returncode == 0:
             return True
@@ -155,22 +335,26 @@ class _TransactionBase:
 
     def _wait_service(self, service: str, *, active: bool) -> None:
         deadline = self._monotonic() + self.timeout
+        attempted = False
         while True:
-            if self._service_active(service) == active:
-                return
-            if self._monotonic() >= deadline:
+            remaining = deadline - self._monotonic()
+            if attempted and remaining < self.probe_timeout:
                 state = "active" if active else "inactive"
                 raise DeploymentError(f"timed out waiting for {service} to become {state}")
-            self._sleep(min(self.poll_interval, max(0.0, deadline - self._monotonic())))
-
-    def _verify(self, mode: str) -> None:
-        report = self.verifier.verify(mode)
-        if not report.ok:
-            raise DeploymentError(f"{mode} verification failed")
+            if self._service_active(service) == active:
+                return
+            attempted = True
+            remaining = deadline - self._monotonic()
+            latest_next_probe = remaining - self.probe_timeout
+            if latest_next_probe <= 0:
+                state = "active" if active else "inactive"
+                raise DeploymentError(f"timed out waiting for {service} to become {state}")
+            interval = self.poll_interval if self.poll_interval > 0 else 0.001
+            self._sleep(min(interval, latest_next_probe))
 
     def _require_yandex_dialog_absent(self) -> None:
         result = self.runner.run(
-            ("pgrep", "-af", YANDEX_EXECUTABLE), timeout=self.timeout
+            ("pgrep", "-af", YANDEX_EXECUTABLE), timeout=self.probe_timeout
         )
         if result.returncode == 1:
             return
@@ -179,6 +363,78 @@ class _TransactionBase:
         raise DeploymentError(
             "unable to prove that the Yandex dialog process has exited; "
             f"status={result.returncode}"
+        )
+
+    def _probe_service_state(self, service: str) -> str:
+        try:
+            return "active" if self._service_active(service) else "inactive"
+        except Exception:
+            return "unknown"
+
+    def _probe_dialog_state(self, executables: tuple[str, ...]) -> str:
+        running = False
+        for executable in executables:
+            try:
+                result = self.runner.run(
+                    ("pgrep", "-af", executable), timeout=self.probe_timeout
+                )
+            except Exception:
+                return "unknown"
+            if result.returncode == 0:
+                running = True
+            elif result.returncode != 1:
+                return "unknown"
+        return "present" if running else "absent"
+
+    def _recovery_state(self) -> RecoveryState:
+        return RecoveryState(
+            marker="present" if self.paths.marker.exists() else "absent",
+            vendor_service=self._probe_service_state(VENDOR_SERVICE),
+            yandex_service=self._probe_service_state(YANDEX_SERVICE),
+            vendor_dialog=self._probe_dialog_state(VENDOR_EXECUTABLES),
+            yandex_dialog=self._probe_dialog_state((YANDEX_EXECUTABLE,)),
+        )
+
+    @staticmethod
+    def _recovery_guidance(state: RecoveryState) -> str:
+        if state.yandex_dialog != "absent" or state.yandex_service != "inactive":
+            reason = (
+                "Yandex dialog absence is not proven"
+                if state.yandex_dialog != "absent"
+                else "Yandex service inactivity is not proven"
+            )
+            if state.marker == "present":
+                return (
+                    f"{reason}; retain the marker and do "
+                    f"not restart {VENDOR_SERVICE}"
+                )
+            return (
+                f"{reason} and marker is absent; do not "
+                f"restart {VENDOR_SERVICE} until safe gating is restored and all "
+                "matching Yandex dialog PIDs are proven absent"
+            )
+        if state.marker == "present":
+            return (
+                "Yandex dialog is absent; remove the marker only after user_config "
+                "again proves robot_current_mode=jijia and a supported current_llm, "
+                f"then restart {VENDOR_SERVICE} and verify vendor-mode"
+            )
+        if (
+            state.vendor_dialog == "present"
+            and state.vendor_service == "active"
+            and state.yandex_service == "inactive"
+        ):
+            return "vendor process appears restored; vendor-mode verification is still required"
+        return (
+            "marker is absent and Yandex dialog is absent; continue read-only "
+            "diagnostics and prove vendor-mode before any further change"
+        )
+
+    def _recovery_failure_detail(self, detail: str) -> str:
+        state = self._recovery_state()
+        return (
+            f"{detail}; final state: {state.render()}; "
+            f"guidance: {self._recovery_guidance(state)}"
         )
 
     def _create_marker(self) -> bool:
@@ -262,18 +518,31 @@ class SwitchController(_TransactionBase):
         verifier: Verifier | None = None,
         *,
         timeout: float = 30.0,
+        probe_timeout: float | None = None,
         poll_interval: float = 0.5,
+        stable_passes: int = 2,
+        sleeper: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         actual_runner = runner or SubprocessCommandRunner()
-        actual_verifier = verifier or DeploymentVerifier(paths, actual_runner)
+        actual_probe_timeout = _resolve_probe_timeout(timeout, probe_timeout)
+        actual_verifier = verifier or DeploymentVerifier(
+            paths, actual_runner, timeout=actual_probe_timeout
+        )
         super().__init__(
             paths,
             actual_runner,
             actual_verifier,
             timeout=timeout,
+            probe_timeout=actual_probe_timeout,
             poll_interval=poll_interval,
+            stable_passes=stable_passes,
+            sleeper=sleeper,
+            monotonic=monotonic,
         )
-        self.preflight = preflight or DeploymentInspector(paths, actual_runner)
+        self.preflight = preflight or DeploymentInspector(
+            paths, actual_runner, timeout=actual_probe_timeout
+        )
 
     @staticmethod
     def plan() -> tuple[str, ...]:
@@ -304,7 +573,11 @@ class SwitchController(_TransactionBase):
     def _run_apply(self) -> TransactionResult:
         preflight = self.preflight.run("switch")
         if not preflight.ok:
-            return TransactionResult(False, False, "switch preflight failed")
+            return TransactionResult(
+                False,
+                False,
+                f"switch preflight failed\n{preflight.render_text()}",
+            )
 
         try:
             self._command("systemctl", "stop", YANDEX_SERVICE)
@@ -331,13 +604,11 @@ class SwitchController(_TransactionBase):
         try:
             self._command("systemctl", "restart", VENDOR_SERVICE)
             self._wait_service(VENDOR_SERVICE, active=True)
-            self._verify("transition")
-            service_preflight = self.preflight.run("service")
-            if not service_preflight.ok:
-                raise DeploymentError("Yandex service preflight failed")
+            self._wait_for_verification("transition")
+            self._wait_for_report("service", self.preflight.run)
             self._command("systemctl", "start", YANDEX_SERVICE)
             self._wait_service(YANDEX_SERVICE, active=True)
-            self._verify("yandex-mode")
+            self._wait_for_verification("yandex-mode")
         except Exception as error:
             return self._fail_with_automatic_rollback(error)
         return TransactionResult(True, True, "Yandex mode established; human acceptance required")
@@ -351,13 +622,8 @@ class SwitchController(_TransactionBase):
             )
         else:
             message = (
-                f"CRITICAL: switch failed: {original}; automatic rollback failed: "
-                f"{rollback_detail}. Manually stop {YANDEX_SERVICE} and prove all "
-                "matching Yandex dialog PIDs are absent. Until then, retain the marker "
-                f"and do not restart {VENDOR_SERVICE}. Only after that proof, remove "
-                "the marker only after user_config again proves robot_current_mode=jijia "
-                "and a supported current_llm; then restart "
-                f"{VENDOR_SERVICE} and verify vendor-mode"
+                f"CRITICAL: switch failed: {original}; automatic rollback not proven: "
+                f"{rollback_detail}"
             )
         return TransactionResult(
             False,
@@ -373,18 +639,23 @@ class SwitchController(_TransactionBase):
             self._wait_service(YANDEX_SERVICE, active=False)
             self._require_yandex_dialog_absent()
         except Exception as error:
-            return False, f"stop Yandex: {error}; marker retained to keep vendor gated"
+            return False, self._recovery_failure_detail(f"stop Yandex: {error}")
         rollback_preflight = self.preflight.run("rollback")
         if not rollback_preflight.ok:
             return (
                 False,
-                "rollback preflight failed; marker retained and vendor restart not attempted",
+                self._recovery_failure_detail(
+                    "rollback preflight failed; vendor restart not attempted\n"
+                    f"{rollback_preflight.render_text()}"
+                ),
             )
         try:
             config_snapshot = self._remove_marker_with_config_guard()
             self._require_config_unchanged_before_vendor_restart(config_snapshot)
         except Exception as error:
-            return False, f"remove marker: {error}; vendor restart not attempted"
+            return False, self._recovery_failure_detail(
+                f"remove marker: {error}; vendor restart not attempted"
+            )
         errors: list[str] = []
         try:
             self._command("systemctl", "restart", VENDOR_SERVICE)
@@ -392,10 +663,12 @@ class SwitchController(_TransactionBase):
         except Exception as error:
             errors.append(f"restart vendor: {error}")
         try:
-            self._verify("vendor-mode")
+            self._wait_for_verification("vendor-mode")
         except Exception as error:
             errors.append(f"verify vendor-mode: {error}")
-        return (not errors, "; ".join(errors) if errors else "vendor-mode verified")
+        if errors:
+            return False, self._recovery_failure_detail("; ".join(errors))
+        return True, "vendor-mode verified"
 
 
 class RollbackController(_TransactionBase):
@@ -407,18 +680,31 @@ class RollbackController(_TransactionBase):
         *,
         preflight: Preflight | None = None,
         timeout: float = 30.0,
+        probe_timeout: float | None = None,
         poll_interval: float = 0.5,
+        stable_passes: int = 2,
+        sleeper: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         actual_runner = runner or SubprocessCommandRunner()
-        actual_verifier = verifier or DeploymentVerifier(paths, actual_runner)
+        actual_probe_timeout = _resolve_probe_timeout(timeout, probe_timeout)
+        actual_verifier = verifier or DeploymentVerifier(
+            paths, actual_runner, timeout=actual_probe_timeout
+        )
         super().__init__(
             paths,
             actual_runner,
             actual_verifier,
             timeout=timeout,
+            probe_timeout=actual_probe_timeout,
             poll_interval=poll_interval,
+            stable_passes=stable_passes,
+            sleeper=sleeper,
+            monotonic=monotonic,
         )
-        self.preflight = preflight or DeploymentInspector(paths, actual_runner)
+        self.preflight = preflight or DeploymentInspector(
+            paths, actual_runner, timeout=actual_probe_timeout
+        )
 
     @staticmethod
     def plan() -> tuple[str, ...]:
@@ -447,7 +733,11 @@ class RollbackController(_TransactionBase):
     def _run_apply(self) -> TransactionResult:
         preflight = self.preflight.run("rollback")
         if not preflight.ok:
-            return TransactionResult(False, False, "rollback preflight failed")
+            return TransactionResult(
+                False,
+                False,
+                f"rollback preflight failed\n{preflight.render_text()}",
+            )
         if not self.paths.marker.exists() and not self._service_active(YANDEX_SERVICE):
             report = self.verifier.verify("vendor-mode")
             if report.ok:
@@ -458,25 +748,18 @@ class RollbackController(_TransactionBase):
             self._wait_service(YANDEX_SERVICE, active=False)
             self._require_yandex_dialog_absent()
             if self.paths.marker.exists():
-                self._verify("transition")
+                self._wait_for_verification("transition")
             config_snapshot = self._remove_marker_with_config_guard()
             self._require_config_unchanged_before_vendor_restart(config_snapshot)
             self._command("systemctl", "restart", VENDOR_SERVICE)
             self._wait_service(VENDOR_SERVICE, active=True)
-            self._verify("vendor-mode")
+            self._wait_for_verification("vendor-mode")
         except Exception as error:
+            detail = self._recovery_failure_detail(str(error))
             return TransactionResult(
                 False,
                 True,
-                (
-                    f"CRITICAL: rollback incomplete: {error}. Manually stop "
-                    f"{YANDEX_SERVICE} and prove all matching Yandex dialog PIDs are "
-                    "absent. Until then, retain the marker and do not restart "
-                    f"{VENDOR_SERVICE}. Only after that proof and after user_config "
-                    "again proves robot_current_mode=jijia and a supported current_llm, "
-                    f"remove {self.paths.marker_logical}, restart {VENDOR_SERVICE}, "
-                    "and verify vendor-mode"
-                ),
+                f"CRITICAL: rollback incomplete: {detail}",
             )
         return TransactionResult(
             True,
