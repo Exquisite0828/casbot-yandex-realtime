@@ -1,13 +1,18 @@
 # Phase 8 Field Deployment Record
 
-> Updated: 2026-08-18
+> Updated: 2026-08-19
 > Phase 8 — IN PROGRESS
 > Phase 8C — COMPLETE
 > Phase 8D — CONFIG/CREDENTIAL PREPARATION COMPLETE
 > Phase 8E — SYSTEMD UNIT INSTALLED; DISABLED/INACTIVE
 > Phase 8F — FIRST SWITCH ATTEMPT FAILED; VENDOR MODE RESTORED
 > Phase 8F repository repair — COMPLETE LOCALLY; LATER YANDEX MODE OBSERVED
-> Phase 8H half-duplex mitigation — IMPLEMENTED LOCALLY; FIELD VALIDATION PENDING
+> Phase 8H half-duplex mitigation — FIELD PASS
+> Phase 8I local implementation — COMPLETE / CONDITIONAL PASS
+> Robot synchronization — PENDING
+> systemd enable — NOT RUN
+> cold-boot acceptance — NOT RUN
+> Gate 8 — NOT FINAL
 
 This document records the Phase 8 facts supplied from the maintenance-window
 field work separately from the historical Phase 4 and Phase 7 conclusions. No
@@ -135,6 +140,19 @@ The later field observation was that the robot began speaking continuously,
 reported as `Она сама говорит без остановки`. This observation is verified;
 its physical cause is not.
 
+User-provided follow-up field evidence confirms that the Phase 8H robot runtime
+actually loaded:
+
+```text
+barge_in_enabled=false
+microphone_resume_guard_ms=500
+```
+
+With that half-duplex version loaded, the field retest did not reproduce the
+robot speaking to itself. Response speed remained normal, and a new human
+question after the robot finished answering still received a response. These
+observations establish a **FIELD PASS for the mitigation**.
+
 ### INFERENCE
 
 The leading hypothesis is that robot speaker output was acoustically captured
@@ -162,17 +180,74 @@ After `RESPONSE_DONE`, uplink remains suppressed for the configured
 project tuning policy, not a manufacturer or Yandex verified fact. The guard
 uses event-loop monotonic time and does not stop or restart `arecord`.
 
-This mitigation is implemented and locally tested only. It is not a
-`FIELD PASS`: the repository was not synchronized to the robot in this work,
-the real `/etc/casbot-yandex-realtime/casbot-yandex.yaml` was not changed, and
-there has been no follow-up field test proving that continuous self-speech no
-longer occurs. Even a later successful field test would validate the mitigation
-without proving the acoustic-feedback hypothesis. The separate
-`STATUS_IDLE`/automatic-session-ending issue remains out of scope.
+The field result validates the mitigation's observed behavior; it does not prove
+that acoustic feedback was the unique physical root cause and does not constitute
+AEC. The older relationship between the continuous-speech incident and a later
+`STATUS_ERROR` remains unproven.
+
+## Phase 8I default boot session and failure observability
+
+Phase 8I is implemented and tested in the local repository only. Generic node
+behavior keeps `auto_start_session=false`; the two CASBOT robot templates set it
+to `true`. After publishers, services, timer, worker and the initial
+`STATUS_IDLE/false` output are ready, one non-blocking start command is submitted
+through the existing asyncio bridge. It is not a watchdog: a later manual
+`stop_session` remains stopped, and no runtime auto-reconnect was added.
+
+Fatal cleanup now emits one final combined diagnostic through a ROS-independent
+sink. The node redacts the configured API key plus Authorization/API-key forms,
+queues only the sanitized text, and writes it through the ROS logger so it can
+reach the service journal. Unexpected command exceptions and otherwise
+unreported critical start/stop failures are also observable; benign text-input
+rejections are not promoted to error logs. No PCM, complete environment,
+`RuntimeConfig` representation, env-file contents or Authorization header is
+intentionally logged.
+
+The systemd template now runs service preflight through the shared Phase 8F
+readiness waiter with a 60 s overall deadline, 5 s per-probe bound, 0.5 s poll
+interval and one complete service PASS. Only the explicit `--wait` entry polls;
+the existing `casbot-yandex-preflight --mode service` remains a one-shot check.
+Hard configuration/credential/marker/mode failures stop immediately, transient
+ROS graph/speaker/microphone settling may retry, and timeout retains the final
+complete `CheckReport`. `Restart=no` and the existing switch/rollback semantics
+are unchanged.
+
+This is **not** evidence that the robot now boots into Yandex mode. The fixed
+commit has not been synchronized for Phase 8I, the real YAML has not been updated
+for `auto_start_session`, the revised unit has not been installed or enabled,
+and no unattended cold boot has been accepted. Therefore:
+
+```text
+Phase 8I local implementation — COMPLETE / CONDITIONAL PASS
+Robot synchronization — PENDING
+systemd enable — NOT RUN
+cold-boot acceptance — NOT RUN
+Gate 8 — NOT FINAL
+```
+
+### Separately authorized cold-boot acceptance sequence
+
+Do not execute these steps as part of the local Phase 8I work:
+
+1. Synchronize one reviewed fixed commit.
+2. Set `auto_start_session=true` in the real robot YAML.
+3. Rebuild the `realtime_dialog` package with colcon.
+4. Install the reviewed systemd unit.
+5. Run daemon-reload.
+6. Run build and bounded service preflight.
+7. Enable `casbot-yandex-dialog.service` under explicit authorization.
+8. Reboot the whole robot.
+9. Do not use SSH to call `start_session`.
+10. Confirm Yandex mode PASS, `STATUS_LISTENING`, `session_active=true`, and an
+    active arecord process.
+11. Have an on-site person speak Russian and receive a normal response.
+12. Verify multiple turns without self-speech and confirm a new question works
+    after each answer.
+13. Perform and verify the formal rollback to vendor mode.
 
 ## Remaining Phase 8 conditions
 
-- synchronize one reviewed fixed commit and rerun preflight on the robot;
+- synchronize one reviewed Phase 8I commit and rerun build/service preflight;
 - preserve and review the readiness reports and final-state output from the
   later successful Yandex-mode establishment;
 - preserve and review replacement-node/ROS-graph evidence from the established
@@ -183,10 +258,14 @@ without proving the acoustic-feedback hypothesis. The separate
 - execute and verify a real normal rollback;
 - retain the first transition's exact historical failure as UNKNOWN;
 - retain vendor watchdog/anti-third-party behavior as NOT PROVEN;
-- deploy the reviewed Phase 8H source and robot configuration, then verify that
-  continuous self-speech no longer occurs before recording a mitigation
-  `FIELD PASS`;
-- retain speaker acoustic feedback as an inference even if the mitigation
-  passes in the field.
+- update the real YAML with `auto_start_session=true`, rebuild
+  `realtime_dialog`, install the reviewed systemd unit, and run daemon-reload;
+- enable the service only under separate authorization, then perform one full
+  unattended cold boot without calling `start_session` over SSH;
+- verify Yandex mode, `STATUS_LISTENING`, `session_active=true`, arecord,
+  direct Russian conversation, continued half-duplex behavior and formal
+  rollback after that cold boot;
+- retain speaker acoustic feedback as an inference despite the Phase 8H
+  mitigation FIELD PASS.
 
 Phase 8 and Gate 8 are not complete or decided by this repair.

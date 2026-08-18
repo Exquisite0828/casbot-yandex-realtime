@@ -12,6 +12,7 @@ if str(DEPLOY_LIB) not in sys.path:
     sys.path.insert(0, str(DEPLOY_LIB))
 
 from casbot_deploy import cli
+from casbot_deploy import operations
 from casbot_deploy.checks import CheckReport, CheckResult, CheckStatus, CommandResult
 from casbot_deploy.operations import (
     ReadinessError,
@@ -182,6 +183,122 @@ class DeploymentReadinessTest(unittest.TestCase):
             self.assertEqual(controller.verifier.timeout, 2.0)
             self.assertEqual(controller.preflight.timeout, 2.0)
             self.assertNotEqual(controller.verifier.timeout, controller.timeout)
+
+    def test_shared_service_waiter_retries_transient_failure_then_passes(self) -> None:
+        reports = [
+            failing_report("service", "speaker_node"),
+            passing_report("service"),
+        ]
+        waiter = operations.ReadinessWaiter(
+            timeout=3.0,
+            probe_timeout=0.25,
+            poll_interval=1.0,
+            sleeper=self.clock.sleep,
+            monotonic=self.clock.monotonic,
+        )
+
+        report = waiter.wait_for_report("service", lambda _mode: reports.pop(0))
+
+        self.assertTrue(report.ok)
+        self.assertEqual(self.clock.sleeps, [1.0])
+
+    def test_shared_service_waiter_stops_immediately_on_hard_failure(self) -> None:
+        reports = [
+            failing_report("service", "env_security"),
+            passing_report("service"),
+        ]
+        waiter = operations.ReadinessWaiter(
+            timeout=3.0,
+            probe_timeout=0.25,
+            poll_interval=1.0,
+            sleeper=self.clock.sleep,
+            monotonic=self.clock.monotonic,
+        )
+
+        with self.assertRaisesRegex(ReadinessError, "hard failure") as raised:
+            waiter.wait_for_report("service", lambda _mode: reports.pop(0))
+
+        self.assertIn("FAIL env_security", str(raised.exception))
+        self.assertEqual(len(reports), 1)
+        self.assertEqual(self.clock.sleeps, [])
+
+    def test_shared_service_waiter_timeout_keeps_last_full_report(self) -> None:
+        report = CheckReport(
+            "service",
+            (
+                CheckResult("marker", CheckStatus.PASS, "present"),
+                CheckResult("speaker_node", CheckStatus.FAIL, "missing"),
+            ),
+        )
+        waiter = operations.ReadinessWaiter(
+            timeout=3.0,
+            probe_timeout=0.25,
+            poll_interval=1.0,
+            sleeper=self.clock.sleep,
+            monotonic=self.clock.monotonic,
+        )
+
+        with self.assertRaisesRegex(ReadinessError, "timed out") as raised:
+            waiter.wait_for_report("service", lambda _mode: report)
+
+        self.assertIn("PASS marker: present", str(raised.exception))
+        self.assertIn("FAIL speaker_node: missing", str(raised.exception))
+        self.assertLessEqual(self.clock.value + 0.25, 3.0)
+
+    def test_preflight_wait_cli_uses_shared_bounded_service_readiness(self) -> None:
+        report = passing_report("service")
+        arguments = [
+            "--mode",
+            "service",
+            "--root",
+            str(self.paths.root),
+            "--wait",
+            "--timeout",
+            "60",
+            "--probe-timeout",
+            "5",
+            "--poll-interval",
+            "0.5",
+        ]
+        with mock.patch.object(cli, "DeploymentInspector") as inspector_class, mock.patch.object(
+            cli, "ReadinessWaiter"
+        ) as waiter_class:
+            inspector_class.return_value.run.return_value = report
+            waiter_class.return_value.wait_for_report.return_value = report
+
+            self.assertEqual(cli.preflight_main(arguments), 0)
+
+            inspector_class.assert_called_once_with(self.paths, timeout=5.0)
+            waiter_class.assert_called_once_with(
+                timeout=60.0,
+                probe_timeout=5.0,
+                poll_interval=0.5,
+            )
+            waiter_class.return_value.wait_for_report.assert_called_once_with(
+                "service", inspector_class.return_value.run
+            )
+
+    def test_preflight_service_without_wait_remains_one_shot(self) -> None:
+        report = passing_report("service")
+        with mock.patch.object(cli, "DeploymentInspector") as inspector_class:
+            inspector_class.return_value.run.return_value = report
+
+            self.assertEqual(
+                cli.preflight_main(
+                    [
+                        "--mode",
+                        "service",
+                        "--root",
+                        str(self.paths.root),
+                        "--timeout",
+                        "7",
+                    ]
+                ),
+                0,
+            )
+
+            inspector_class.assert_called_once_with(self.paths, timeout=7.0)
+            inspector_class.return_value.run.assert_called_once_with("service")
 
     def test_cli_propagates_readiness_policy_to_switch_and_rollback(self) -> None:
         arguments = [

@@ -19,6 +19,7 @@ class FakeClient:
         self.handler = None
         self.generation = 0
         self.connect_calls = 0
+        self.connect_error: Exception | None = None
         self.sent_audio: list[bytes] = []
         self.sent_text: list[str] = []
         self.cancel_calls = 0
@@ -43,6 +44,10 @@ class FakeClient:
     async def connect(self, generation_id: int) -> None:
         self.connect_calls += 1
         self.generation = generation_id
+        if self.connect_error is not None:
+            error = self.connect_error
+            self.connect_error = None
+            raise error
         await self.handler(
             RealtimeEvent(RealtimeEventKind.SESSION_READY, generation_id, {})
         )
@@ -424,12 +429,61 @@ class DialogControllerTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(pending_lifecycle_tasks, [])
 
+    async def test_fatal_cleanup_reports_one_final_combined_diagnostic(self) -> None:
+        diagnostics: list[str] = []
+        self.controller = self._make_controller(failure_sink=diagnostics.append)
+        await self.controller.start_session()
+        generation = self.controller.generation_id
+        self.mic.stop_error = RuntimeError("capture cleanup failed")
+        self.client.close_error = RuntimeError("transport cleanup failed")
+
+        await asyncio.gather(
+            self.controller.handle_event(
+                RealtimeEvent(
+                    RealtimeEventKind.ERROR,
+                    generation,
+                    {"message": "transport dropped"},
+                )
+            ),
+            self.controller.handle_event(
+                RealtimeEvent(
+                    RealtimeEventKind.TRANSPORT_CLOSED,
+                    generation,
+                    {"message": "duplicate close"},
+                )
+            ),
+        )
+        await self.controller._await_failure_cleanup()
+
+        self.assertEqual(len(diagnostics), 1)
+        self.assertIn("transport dropped", diagnostics[0])
+        self.assertIn("capture cleanup failed", diagnostics[0])
+        self.assertIn("transport cleanup failed", diagnostics[0])
+        self.assertEqual(diagnostics, [self.controller.last_error])
+
+    async def test_session_start_failure_reports_once_after_cleanup(self) -> None:
+        diagnostics: list[str] = []
+        self.controller = self._make_controller(failure_sink=diagnostics.append)
+        self.client.connect_error = RuntimeError("connect refused")
+
+        result = await self.controller.start_session()
+
+        self.assertFalse(result.success)
+        self.assertEqual(self.controller.state, STATUS_ERROR)
+        self.assertEqual(diagnostics, ["session start failed: connect refused"])
+
     async def test_current_microphone_runtime_error_enters_error(self) -> None:
+        diagnostics: list[str] = []
+        self.controller = self._make_controller(failure_sink=diagnostics.append)
         await self.controller.start_session()
         self.mic.fail(RuntimeError("arecord exited"))
         await self._event_loop_checkpoint()
         await self.controller._await_failure_cleanup()
         self.assertEqual(self.controller.state, STATUS_ERROR)
+        self.assertEqual(
+            diagnostics,
+            ["microphone capture failed: RuntimeError"],
+        )
         self.assertFalse(self.mic.started)
         self.assertIsNone(self.controller.microphone_sender_task)
 

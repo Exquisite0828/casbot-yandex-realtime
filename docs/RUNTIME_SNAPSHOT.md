@@ -505,3 +505,53 @@ switch 和真实正常 rollback 均未执行。详细时间线见
 
 继续未决：`hw:0,0` capture PASS、替换节点的 speaker/嘴型/flush、厂家
 `session_active` 精确时序、正常 rollback，以及完整机器人功能验收。
+
+## Phase 8H follow-up field evidence（2026-08-19）
+
+本节记录用户提供的后续现场事实；本轮 Codex 没有 SSH、机器人命令或真实 Yandex
+调用。
+
+**VERIFIED BY USER-PROVIDED FIELD RESULT：**第二次受控 Vendor → Yandex 切换
+成功；Yandex Realtime、机器人麦克风、兼容 ROS2 node 与 speaker 回复链路曾真实
+运行。真人俄语理解与回复正常，现场主观响应速度正常或很快。
+
+机器人实际加载的 Phase 8H 参数为：
+
+```text
+barge_in_enabled=false
+microphone_resume_guard_ms=500
+```
+
+加载该版本后的现场复测未再次出现机器人自问自答，响应速度正常，机器人回答结束
+后再次提问仍可继续响应。因此 Phase 8H mitigation 为 **FIELD PASS**。
+
+**INFERENCE / UNKNOWN：**该结果只证明 mitigation 在这次现场复测中有效，不能证明
+speaker acoustic feedback 是唯一物理根因，也不构成 AEC。旧版本曾见的
+`STATUS_ERROR` 是否由此前连续自反馈造成仍未验证；正常使用下是否会独立随机发生
+session failure 仍未知。
+
+## Phase 8I local implementation boundary（2026-08-19）
+
+本地仓库增加 generic-default-false 的 `auto_start_session`，两个 CASBOT 配置模板显式
+设为 true；节点完整初始化并先排入 `STATUS_IDLE/false` 后，仅通过后台 asyncio bridge
+非阻塞提交一次 start。人工 stop 后不会自动再次启动，也没有 runtime auto-reconnect。
+
+Controller fatal cleanup 完成后输出一次最终组合 failure diagnostic。节点仅将经 API
+key、Authorization 和 API-key 形式脱敏后的 reason 放入 outbound queue，再由 ROS
+logger 写入 systemd journal；不主动记录 PCM、完整环境、`RuntimeConfig` repr、env 文件
+内容或 WebSocket Authorization header。
+
+systemd service 模板的 ExecStartPre 改为复用 Phase 8F shared readiness waiter：60 秒
+overall deadline、5 秒 probe bound、0.5 秒 poll interval、service 一次完整 PASS；hard
+failure 立即停止，transient graph/speaker/microphone settling 可重试，timeout 保留最后
+完整报告。一次性的 `preflight --mode service` 仍保持兼容，`Restart=no` 不变。
+
+以上仅为本地实现边界，不是机器人开机默认使用 Yandex 的运行时事实：
+
+```text
+Phase 8I local implementation — COMPLETE / CONDITIONAL PASS
+Robot synchronization — PENDING
+systemd enable — NOT RUN
+cold-boot acceptance — NOT RUN
+Gate 8 — NOT FINAL
+```

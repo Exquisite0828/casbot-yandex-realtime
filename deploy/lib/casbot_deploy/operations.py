@@ -147,7 +147,7 @@ class RecoveryState:
         )
 
 
-def _resolve_probe_timeout(timeout: float, probe_timeout: float | None) -> float:
+def resolve_probe_timeout(timeout: float, probe_timeout: float | None) -> float:
     if timeout <= 0:
         raise ValueError("timeout must be greater than zero")
     value = min(5.0, timeout / 2.0) if probe_timeout is None else probe_timeout
@@ -156,6 +156,99 @@ def _resolve_probe_timeout(timeout: float, probe_timeout: float | None) -> float
     if value >= timeout:
         raise ValueError("probe_timeout must be smaller than timeout")
     return value
+
+
+class ReadinessWaiter:
+    """Shared bounded polling for switch, rollback, and service startup."""
+
+    def __init__(
+        self,
+        *,
+        timeout: float,
+        probe_timeout: float,
+        poll_interval: float,
+        stable_passes: int = 2,
+        sleeper: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if timeout <= 0:
+            raise ValueError("timeout must be greater than zero")
+        if probe_timeout <= 0:
+            raise ValueError("probe_timeout must be greater than zero")
+        if probe_timeout >= timeout:
+            raise ValueError("probe_timeout must be smaller than timeout")
+        if poll_interval < 0:
+            raise ValueError("poll_interval must not be negative")
+        if stable_passes < 1:
+            raise ValueError("stable_passes must be at least one")
+        self.timeout = timeout
+        self.probe_timeout = probe_timeout
+        self.poll_interval = poll_interval
+        self.stable_passes = stable_passes
+        self._sleep = sleeper
+        self._monotonic = monotonic
+
+    @staticmethod
+    def _is_hard_failure(policy: ReadinessPolicy, report: CheckReport) -> bool:
+        return any(
+            check.name not in policy.retryable_failures
+            or "UNKNOWN" in check.detail.upper()
+            for check in report.failures
+        )
+
+    def wait_for_report(
+        self,
+        mode: str,
+        probe: Callable[[str], CheckReport],
+    ) -> CheckReport:
+        try:
+            policy = READINESS_POLICIES[mode]
+        except KeyError as error:
+            raise ValueError(f"unsupported readiness mode: {mode}") from error
+        required_stable_passes = (
+            policy.stable_passes if mode == "service" else self.stable_passes
+        )
+        deadline = self._monotonic() + self.timeout
+        stable_passes = 0
+        last_report: CheckReport | None = None
+        while True:
+            remaining = deadline - self._monotonic()
+            if last_report is not None and remaining < self.probe_timeout:
+                raise ReadinessError(
+                    mode,
+                    "timed out",
+                    last_report,
+                    stable_passes=stable_passes,
+                    required_stable_passes=required_stable_passes,
+                )
+            report = probe(mode)
+            last_report = report
+            if report.ok:
+                stable_passes += 1
+                if stable_passes >= required_stable_passes:
+                    return report
+            else:
+                stable_passes = 0
+                if self._is_hard_failure(policy, report):
+                    raise ReadinessError(
+                        mode,
+                        "hard failure",
+                        report,
+                        stable_passes=stable_passes,
+                        required_stable_passes=required_stable_passes,
+                    )
+            remaining = deadline - self._monotonic()
+            latest_next_probe = remaining - self.probe_timeout
+            if latest_next_probe <= 0:
+                raise ReadinessError(
+                    mode,
+                    "timed out",
+                    report,
+                    stable_passes=stable_passes,
+                    required_stable_passes=required_stable_passes,
+                )
+            interval = self.poll_interval if self.poll_interval > 0 else 0.001
+            self._sleep(min(interval, latest_next_probe))
 
 
 def _fsync_directory(path: Path) -> None:
@@ -195,15 +288,13 @@ class _TransactionBase:
         self.stable_passes = stable_passes
         self._sleep = sleeper
         self._monotonic = monotonic
-
-    @staticmethod
-    def _is_hard_readiness_failure(
-        policy: ReadinessPolicy, report: CheckReport
-    ) -> bool:
-        return any(
-            check.name not in policy.retryable_failures
-            or "UNKNOWN" in check.detail.upper()
-            for check in report.failures
+        self._readiness = ReadinessWaiter(
+            timeout=timeout,
+            probe_timeout=probe_timeout,
+            poll_interval=poll_interval,
+            stable_passes=stable_passes,
+            sleeper=sleeper,
+            monotonic=monotonic,
         )
 
     def _wait_for_report(
@@ -211,51 +302,7 @@ class _TransactionBase:
         mode: str,
         probe: Callable[[str], CheckReport],
     ) -> CheckReport:
-        policy = READINESS_POLICIES[mode]
-        required_stable_passes = (
-            policy.stable_passes if mode == "service" else self.stable_passes
-        )
-        deadline = self._monotonic() + self.timeout
-        stable_passes = 0
-        last_report: CheckReport | None = None
-        while True:
-            remaining = deadline - self._monotonic()
-            if last_report is not None and remaining < self.probe_timeout:
-                raise ReadinessError(
-                    mode,
-                    "timed out",
-                    last_report,
-                    stable_passes=stable_passes,
-                    required_stable_passes=required_stable_passes,
-                )
-            report = probe(mode)
-            last_report = report
-            if report.ok:
-                stable_passes += 1
-                if stable_passes >= required_stable_passes:
-                    return report
-            else:
-                stable_passes = 0
-                if self._is_hard_readiness_failure(policy, report):
-                    raise ReadinessError(
-                        mode,
-                        "hard failure",
-                        report,
-                        stable_passes=stable_passes,
-                        required_stable_passes=required_stable_passes,
-                    )
-            remaining = deadline - self._monotonic()
-            latest_next_probe = remaining - self.probe_timeout
-            if latest_next_probe <= 0:
-                raise ReadinessError(
-                    mode,
-                    "timed out",
-                    report,
-                    stable_passes=stable_passes,
-                    required_stable_passes=required_stable_passes,
-                )
-            interval = self.poll_interval if self.poll_interval > 0 else 0.001
-            self._sleep(min(interval, latest_next_probe))
+        return self._readiness.wait_for_report(mode, probe)
 
     def _wait_for_verification(self, mode: str) -> CheckReport:
         return self._wait_for_report(mode, self.verifier.verify)
@@ -525,7 +572,7 @@ class SwitchController(_TransactionBase):
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         actual_runner = runner or SubprocessCommandRunner()
-        actual_probe_timeout = _resolve_probe_timeout(timeout, probe_timeout)
+        actual_probe_timeout = resolve_probe_timeout(timeout, probe_timeout)
         actual_verifier = verifier or DeploymentVerifier(
             paths, actual_runner, timeout=actual_probe_timeout
         )
@@ -687,7 +734,7 @@ class RollbackController(_TransactionBase):
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         actual_runner = runner or SubprocessCommandRunner()
-        actual_probe_timeout = _resolve_probe_timeout(timeout, probe_timeout)
+        actual_probe_timeout = resolve_probe_timeout(timeout, probe_timeout)
         actual_verifier = verifier or DeploymentVerifier(
             paths, actual_runner, timeout=actual_probe_timeout
         )

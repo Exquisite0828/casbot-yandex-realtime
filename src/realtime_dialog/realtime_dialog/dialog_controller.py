@@ -50,6 +50,7 @@ class DialogController:
         audio_output: AudioOutputAdapter,
         status_sink: Callable[[str], object],
         text_result_sink: Callable[[str], object],
+        failure_sink: Callable[[str], object] | None = None,
         microphone_queue_chunks: int = 50,
         barge_in_enabled: bool = True,
         microphone_resume_guard_ms: int = 500,
@@ -64,6 +65,7 @@ class DialogController:
         self._audio_output = audio_output
         self._status_sink = status_sink
         self._text_result_sink = text_result_sink
+        self._failure_sink = failure_sink
         self._state = STATUS_IDLE
         self._generation_id = 0
         self._command_lock = asyncio.Lock()
@@ -533,3 +535,9 @@ class DialogController:
         if cleanup_errors:
             self._last_error = f"{message}; {'; '.join(cleanup_errors)}"
         self._set_state(STATUS_ERROR)
+        if self._failure_sink is not None:
+            try:
+                self._failure_sink(self._last_error)
+            except Exception:
+                # Diagnostics must never destabilize the completed cleanup path.
+                pass

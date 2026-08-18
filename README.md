@@ -31,10 +31,15 @@ Phase 8C — COMPLETE
 Phase 8D — CONFIG/CREDENTIAL PREPARATION COMPLETE
 Phase 8E — SYSTEMD UNIT INSTALLED; DISABLED/INACTIVE
 Phase 8F — FIRST SWITCH ATTEMPT FAILED; VENDOR MODE RESTORED
-Phase 8F repository repair — COMPLETE LOCALLY; ROBOT RESYNC/SECOND SWITCH PENDING
-Robot Yandex session probe — PASS; replacement ROS2 node takeover NOT PROVEN
-Formal switch — NOT COMPLETE
+Phase 8F repository repair — COMPLETE; LATER CONTROLLED SWITCH SUCCEEDED
+Phase 8H half-duplex mitigation — FIELD PASS
+Phase 8I local implementation — COMPLETE / CONDITIONAL PASS
+Robot synchronization for Phase 8I — PENDING
+systemd enable — NOT RUN
+cold-boot acceptance — NOT RUN
+Formal switch — YANDEX MODE ESTABLISHED; FULL ACCEPTANCE INCOMPLETE
 Formal rollback — NOT STARTED
+Gate 8 — NOT FINAL
 ```
 
 本地 Phase 2 真人 PoC 已使用 `speech-realtime-260528` 跑通当前 WebSocket、24 kHz PCM 麦克风输入、俄语多轮回答、增量回答音频和本地扬声器输出；未使用 fallback。播放中本地停止与 truncate 曾实际成功，用户随后明确取消了“生成中 response.cancel 必须 live 验证”的本轮要求。详见 `docs/YANDEX_REALTIME_LOCAL_POC.md`。
@@ -68,13 +73,21 @@ transition 的具体失败 CheckReport，因此该失败项仍为 **UNKNOWN**；
 race 只是当前最强工程推断，厂家 watchdog/反第三方机制既未被证明存在，也未被证明
 不存在。
 
-仓库已完成 Phase 8F 本地 Gate Repair：transition、service、Yandex mode、automatic
-rollback 和正常 rollback 共享有界 readiness polling，区分 overall deadline 与单次
-probe timeout，要求连续稳定 PASS，保留最后完整报告，并按最终 marker/service/process
-状态生成恢复指引。修复版本尚未重新同步机器人，第二次 switch 尚未执行；Phase 8
-和 Gate 8 均未完成。`hw:0,0` 实际打开、嘴型/flush、厂家 `session_active` 精确时序和
-speaker 转换行为仍为 **UNKNOWN / DEFERRED / CONDITIONAL**。详见
-`docs/PHASE8_FIELD_DEPLOYMENT.md`、`docs/RUNTIME_SNAPSHOT.md` 和 `deploy/README.md`。
+仓库完成 Phase 8F Gate Repair 后，用户提供的后续现场证据确认第二次受控切换成功，
+Yandex Realtime、机器人麦克风、兼容 ROS2 节点和 speaker 回复链路曾真实运行。Phase
+8H 的 `barge_in_enabled=false` 与 500 ms microphone guard 已实际加载；现场复测未再
+出现自问自答，响应速度正常，回答后继续提问仍可响应，因此 mitigation 为
+**FIELD PASS**。这只证明 mitigation 在该现场复测中有效，不证明声学反馈是唯一物理
+根因，也不代表实现了 AEC。
+
+Phase 8I 已在本地实现开机节点生命周期的一次性非阻塞 `auto_start_session`、脱敏
+failure journal logging，以及 systemd service preflight 的共享有界 readiness polling。
+generic code 默认关闭 auto-start，两个机器人模板显式开启；`Restart=no`、half-duplex、
+外部 ROS2 契约和 switch/rollback 语义均保持不变，未加入 runtime auto-reconnect。
+该结论仅为 **本地 COMPLETE / CONDITIONAL PASS**：固定提交尚未同步机器人，真实 YAML
+尚未更新，unit 尚未 enable，整机冷启动无人干预验收尚未执行，Gate 8 仍非最终结论。
+详见 `docs/PHASE8_FIELD_DEPLOYMENT.md`、`docs/RUNTIME_SNAPSHOT.md` 和
+`deploy/README.md`。
 
 ## Key documents
 

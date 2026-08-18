@@ -15,6 +15,8 @@
     # Production half-duplex policy; 500 ms is project tuning, not a vendor fact.
     barge_in_enabled: false
     microphone_resume_guard_ms: 500
+    # Production boot policy; generic node code defaults this to false.
+    auto_start_session: true
 
     yandex_input_sample_rate: 24000
     yandex_output_sample_rate: 24000

@@ -7,7 +7,10 @@
 > Phase 8D — CONFIG/CREDENTIAL PREPARATION COMPLETE
 > Phase 8E — SYSTEMD UNIT INSTALLED; DISABLED/INACTIVE
 > Phase 8F — FIRST SWITCH ATTEMPT FAILED; VENDOR MODE RESTORED
-> Phase 8F repair — COMPLETE LOCALLY; ROBOT RESYNC/SECOND SWITCH PENDING
+> Phase 8F repair — COMPLETE; LATER CONTROLLED SWITCH SUCCEEDED
+> Phase 8H half-duplex mitigation — FIELD PASS
+> Phase 8I local implementation — COMPLETE / CONDITIONAL PASS
+> Robot synchronization — PENDING; systemd enable/cold-boot acceptance — NOT RUN
 > All write commands are dry-run unless `--apply` is supplied.
 > This repository repair did not access or modify the robot.
 
@@ -79,8 +82,8 @@ original nounset state. Do not replace this with a subshell, a hardcoded
 `AMENT_TRACE_SETUP_FILES` value, or a wrapper-wide `set +u`.
 
 The nounset repair was subsequently field-validated by a passing build preflight.
-The newer Phase 8F readiness repair has passed local regression only and must be
-synchronized from one reviewed fixed commit before another switch.
+User-provided later field evidence confirms that a controlled Yandex-mode switch
+succeeded and that the Phase 8H half-duplex configuration passed its field retest.
 
 ## Vendor launch gate
 
@@ -129,6 +132,11 @@ movement, internal speaker conversion, flush behavior, or `hw:0,0` capture;
 
 Never print or commit populated `yandex.env`.
 
+The generic ROS node default is `auto_start_session=false`. Both repository
+CASBOT robot templates explicitly set `auto_start_session=true`; the real
+`/etc/casbot-yandex-realtime/casbot-yandex.yaml` remains a separately managed
+deployment file and is not changed by this local work.
+
 Preflight requires env/config/marker files to be regular non-symlinks with trusted
 ownership, safe parents and modes. The env file accepts only the four documented
 assignments—no `export`, duplicates, extra variables or unsupported escaping.
@@ -155,6 +163,20 @@ deploy/bin/casbot-yandex-preflight --mode switch --json
 
 Checks return explicit `PASS`, `FAIL` or `DEFERRED`. Command/graph uncertainty
 is a failure, not proof that a process or node is absent.
+
+The existing service command above remains a one-shot snapshot. The explicit
+boot-readiness entry reuses the same Phase 8F readiness policy:
+
+```bash
+deploy/bin/casbot-yandex-preflight --mode service --wait \
+  --timeout 60 --probe-timeout 5 --poll-interval 0.5
+```
+
+It requires one complete service PASS. Transient ROS graph, speaker, vendor
+dialog exit, or microphone-release settling can retry within the monotonic
+deadline. Marker, gate, credential, robot-mode, configuration and unknown-state
+failures stop immediately. A timeout prints the complete last `CheckReport`.
+No shell sleep loop or runtime reconnect is involved.
 
 ## Mode verification
 
@@ -276,11 +298,13 @@ marker atomically and blocks the restart.
 
 The template is `systemd/casbot-yandex-dialog.service`. It requires and follows
 the retained vendor main service, but does not conflict with it. It has
-`Restart=no` and a marker condition.
+`Restart=no` and a marker condition. Its `ExecStartPre` uses the explicit bounded
+service wait with a 60 s overall deadline, 5 s probe bound and 0.5 s interval;
+`TimeoutStartSec=75s` leaves a bounded margin for preflight completion and
+process startup.
 
-For the first Phase 8 validation, do not enable the service. Install the unit,
-reload systemd, and use a manual start only after preflight and transition
-verification. Enabling is a separate post-acceptance decision.
+Phase 8I does not enable or install this revised unit. Enabling it and running an
+unattended cold boot remain separately authorized field acceptance steps.
 
 ## Phase 8F field boundary
 
@@ -292,9 +316,28 @@ inactive. The exact historical transition failure was not retained and remains
 UNKNOWN. A settling race is the leading inference, not a proven diagnosis;
 vendor watchdog or anti-third-party behavior is not proven either way.
 
-The readiness repair in this repository has not been synchronized to the robot,
-and the second switch has not been executed. See
-`docs/PHASE8_FIELD_DEPLOYMENT.md` for the evidence boundary.
+User-provided later field evidence confirms a controlled Yandex-mode switch and
+a Phase 8H half-duplex FIELD PASS. The exact old first-transition failure remains
+UNKNOWN, and a successful later switch does not retroactively identify it.
+
+## Phase 8I local boundary and cold-boot handoff
+
+The node now supports a one-shot, non-blocking `auto_start_session`. It submits
+through the existing background bridge only after node interfaces, timer and
+initial `STATUS_IDLE/false` output are ready. Manual `stop_session` does not
+trigger another automatic start, and there is no runtime auto-reconnect.
+
+Session cleanup reports one final combined failure through a sanitized queue to
+the ROS logger/systemd journal. The configured API key and Authorization/API-key
+forms are redacted; runtime configuration objects, the environment file, PCM and
+Authorization headers are not intentionally logged.
+
+Phase 8I is `COMPLETE / CONDITIONAL PASS` locally only. Deployment still requires
+one reviewed fixed commit, real YAML update, colcon rebuild, revised unit install,
+daemon-reload, separately authorized enable, and a full reboot without an SSH
+`start_session` call. Accept only after Yandex mode, `STATUS_LISTENING`,
+`session_active=true`, arecord, direct Russian conversation, continued
+half-duplex behavior and formal rollback are verified. Gate 8 is not final.
 
 ## Complete uninstall
 

@@ -1,11 +1,13 @@
 # ROS2 Compatibility Skeleton and Phase 5 Adapter Handoff
 
-> Updated: 2026-08-14
+> Updated: 2026-08-19
 > Phase 3: COMPLETE; historical Gate 3: CONDITIONAL PASS
 > Phase 4: COMPLETE; Gate 4: PASS
 > Phase 5: COMPLETE; Gate 5: CONDITIONAL PASS
-> Phase 6: COMPLETE; Gate 6: PASS; Phase 7: NOT STARTED
-> Robot deployment/runtime launch: NOT RUN
+> Phase 6: COMPLETE; Gate 6: PASS
+> Phase 8H half-duplex mitigation: FIELD PASS
+> Phase 8I local implementation: COMPLETE / CONDITIONAL PASS
+> Phase 8I robot synchronization/enable/cold boot: NOT RUN
 
 ## Package and boundaries
 
@@ -118,6 +120,30 @@ overridable example values `namespace=lzdl10823` and `node_name=dialog_node`,
 resolving to the Phase 4-observed surface such as
 `/lzdl10823/audio/dialog_play` and `/lzdl10823/dialog/status`.
 
+## Default-session lifecycle and failure observability
+
+`auto_start_session` is part of the ROS behavior configuration. Generic node
+code defaults it to `false`; the two CASBOT robot profiles explicitly set it to
+`true`. When enabled, node construction first creates publishers, services,
+subscription, timer, background worker and command bridge and queues the initial
+`STATUS_IDLE`/`session_active=false` pair. A one-shot scheduler then submits
+`start_session` through `BackgroundCommandBridge` without waiting in the ROS
+executor. It never acts as a watchdog: manual `stop_session` leaves the node in
+`STATUS_IDLE`, and no runtime auto-reconnect was introduced.
+
+The Controller has a ROS-independent failure sink. Fatal cleanup first finishes
+generation invalidation, flush, microphone/sender shutdown and transport close,
+combines any cleanup errors into `last_error`, enters `STATUS_ERROR`, and emits
+one final diagnostic. The node redacts the configured key plus Authorization and
+API-key forms, queues only sanitized text, and calls the ROS error logger from
+the normal outbound timer drain. Unexpected command Future exceptions and
+critical start/stop results not already reported by the Controller are visible;
+benign text validation failures are not error-journal noise.
+
+This preserves all external Topic/Service names and status/session-active
+semantics. It does not log PCM, complete environment state, `RuntimeConfig`
+representations, env-file contents or WebSocket Authorization headers.
+
 ## QoS and `session_active`
 
 Phase 4 verified Reliability and Durability; history depth was not collected.
@@ -185,6 +211,8 @@ flush is published before any subsequently queued new-generation audio.
 `mic_device` and `speaker_pcm_format` must be confirmed by an integrator;
 credentials remain process-environment-only through `YANDEX_API_KEY`.
 `package.xml` declares `lingze_msgs`, and setup installs launch/config files.
+The CASBOT profile also keeps `barge_in_enabled=false`, the 500 ms project guard,
+and `auto_start_session=true`; the generic node default for auto-start is false.
 
 ## Local verification status
 
@@ -209,6 +237,13 @@ and compileall also passed. See `PHASE6_SYSTEMATIC_TESTING.md`.
 The current macOS environment has no `ros2`, `colcon`, `rclpy` or
 `lingze_msgs`, so a real ROS2 Humble build and wrapper launch were **NOT RUN —
 environment unavailable**. This statement is not a ROS runtime PASS.
+
+Later user-provided field evidence confirms that the Phase 8H half-duplex
+parameters were loaded on the robot and passed the self-speech retest. Phase 8I
+auto-start and diagnostic behavior are local implementation/test evidence only:
+the fixed commit has not been synchronized, the revised unit has not been
+enabled, and an unattended cold boot without a manual `start_session` call has
+not been run. Gate 8 remains non-final.
 
 ## Gate 5 conditional runtime items
 

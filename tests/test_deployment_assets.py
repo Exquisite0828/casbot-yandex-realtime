@@ -61,11 +61,12 @@ class DeploymentAssetsTest(unittest.TestCase):
             "PartOf=lingze_robot.service",
             "ConditionPathExists=/etc/casbot-yandex-realtime/external-dialog.enabled",
             "EnvironmentFile=/etc/casbot-yandex-realtime/yandex.env",
-            "ExecStartPre=/opt/casbot-yandex-realtime/deploy/bin/casbot-yandex-preflight --mode service",
+            "ExecStartPre=/opt/casbot-yandex-realtime/deploy/bin/casbot-yandex-preflight --mode service --wait --timeout 60 --probe-timeout 5 --poll-interval 0.5",
             "ExecStart=/opt/casbot-yandex-realtime/deploy/bin/casbot-yandex-launch",
             "KillSignal=SIGINT",
             "KillMode=control-group",
             "Restart=no",
+            "TimeoutStartSec=75s",
             "WantedBy=multi-user.target",
         ):
             self.assertIn(required, text)
@@ -85,6 +86,7 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertIn('mic_device: "hw:0,0"', deployment)
         self.assertIn("barge_in_enabled: false", deployment)
         self.assertIn("microphone_resume_guard_ms: 500", deployment)
+        self.assertIn("auto_start_session: true", deployment)
         self.assertIn("NOT a capture PASS", deployment)
         self.assertIn("Phase 8", deployment)
 

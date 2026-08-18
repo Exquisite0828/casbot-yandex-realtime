@@ -1,4 +1,5 @@
 from pathlib import Path
+from concurrent.futures import Future
 import time
 import unittest
 import xml.etree.ElementTree as ET
@@ -14,6 +15,8 @@ from realtime_dialog.realtime_dialog_node import (
     shutdown_runtime,
     validate_robot_adapter_config,
 )
+from realtime_dialog import realtime_dialog_node as node_module
+from realtime_dialog.dialog_controller import ControllerResult
 from realtime_dialog.adapters import QueuedRobotAudioOutputAdapter
 from realtime_dialog.adapters import AdapterNotConfiguredError
 from realtime_dialog.ros_contract import (
@@ -145,7 +148,126 @@ class RosContractTest(unittest.TestCase):
         self.assertIn("mic_device: \"hw:0,0\"", config_text)
         self.assertIn("barge_in_enabled: false", config_text)
         self.assertIn("microphone_resume_guard_ms: 500", config_text)
+        self.assertIn("auto_start_session: true", config_text)
         self.assertNotIn("YANDEX_API_KEY", config_text)
+
+    def test_auto_start_disabled_does_not_submit(self) -> None:
+        calls: list[str] = []
+        starter = node_module.InitialSessionAutoStarter(
+            enabled=False,
+            submit=lambda: calls.append("submit"),
+            watch=lambda _future, _command: calls.append("watch"),
+        )
+
+        self.assertIsNone(starter.schedule_once())
+        self.assertEqual(calls, [])
+
+    def test_auto_start_enabled_submits_exactly_once_without_waiting(self) -> None:
+        future: Future[object] = Future()
+        submissions: list[str] = []
+        watched: list[tuple[Future[object], str]] = []
+
+        def submit() -> Future[object]:
+            submissions.append("submit")
+            return future
+
+        starter = node_module.InitialSessionAutoStarter(
+            enabled=True,
+            submit=submit,
+            watch=lambda value, command: watched.append((value, command)),
+        )
+
+        self.assertIs(starter.schedule_once(), future)
+        self.assertFalse(future.done())
+        future.set_result(ControllerResult(True, "session started"))
+        self.assertIsNone(starter.schedule_once())
+        self.assertEqual(submissions, ["submit"])
+        self.assertEqual(watched, [(future, "auto-start")])
+
+    def test_auto_start_default_and_initial_status_order_are_explicit(self) -> None:
+        source = (
+            PACKAGE_ROOT / "realtime_dialog" / "realtime_dialog_node.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('declare_parameter("auto_start_session", False)', source)
+        self.assertLess(
+            source.index("self._enqueue_status(STATUS_IDLE)"),
+            source.index("self._auto_starter.schedule_once()"),
+        )
+
+    def test_failure_reporter_redacts_credentials_before_journal_queue(self) -> None:
+        secret = "phase8i-obviously-fake-api-key"
+        diagnostics: list[str] = []
+        reporter = node_module.FailureJournalReporter(
+            diagnostics.append,
+            secrets=(secret,),
+        )
+
+        reporter.report(
+            "dialog session failure",
+            (
+                f"transport failed; Authorization: Api-Key {secret}; "
+                f"api_key={secret}; YANDEX_API_KEY={secret}"
+            ),
+        )
+
+        self.assertEqual(len(diagnostics), 1)
+        self.assertTrue(diagnostics[0].startswith("dialog session failure: "))
+        self.assertIn("transport failed", diagnostics[0])
+        self.assertNotIn(secret, diagnostics[0])
+        self.assertNotIn(f"Api-Key {secret}", diagnostics[0])
+
+    def test_unexpected_command_exception_is_observable_and_sets_error(self) -> None:
+        future: Future[object] = Future()
+        future.set_exception(RuntimeError("worker exploded"))
+        diagnostics: list[tuple[str, str]] = []
+        statuses: list[str] = []
+
+        node_module.observe_command_completion(
+            future,
+            command="auto-start",
+            last_error=None,
+            failure_sink=lambda prefix, reason: diagnostics.append((prefix, reason)),
+            status_sink=statuses.append,
+        )
+
+        self.assertEqual(
+            diagnostics,
+            [("dialog command exception", "auto-start RuntimeError: worker exploded")],
+        )
+        self.assertEqual(statuses, [STATUS_ERROR])
+
+    def test_failed_start_result_is_logged_unless_controller_already_reported_it(self) -> None:
+        result = ControllerResult(False, "session start failed: transport unavailable")
+        for last_error, expected_count in ((None, 1), (result.message, 0)):
+            with self.subTest(last_error=last_error):
+                future: Future[ControllerResult] = Future()
+                future.set_result(result)
+                diagnostics: list[tuple[str, str]] = []
+                node_module.observe_command_completion(
+                    future,
+                    command="auto-start",
+                    last_error=last_error,
+                    failure_sink=lambda prefix, reason: diagnostics.append(
+                        (prefix, reason)
+                    ),
+                    status_sink=lambda _status: None,
+                )
+                self.assertEqual(len(diagnostics), expected_count)
+
+    def test_benign_text_rejection_does_not_emit_failure_diagnostic(self) -> None:
+        future: Future[ControllerResult] = Future()
+        future.set_result(ControllerResult(False, "text input is empty"))
+        diagnostics: list[tuple[str, str]] = []
+
+        node_module.observe_command_completion(
+            future,
+            command="text-input",
+            last_error=None,
+            failure_sink=lambda prefix, reason: diagnostics.append((prefix, reason)),
+            status_sink=lambda _status: None,
+        )
+
+        self.assertEqual(diagnostics, [])
 
     def test_ros_half_duplex_parameters_are_declared_and_propagated(self) -> None:
         node_source = (
@@ -161,6 +283,7 @@ class RosContractTest(unittest.TestCase):
             "microphone_resume_guard_ms=behavior_config.microphone_resume_guard_ms",
             node_source,
         )
+        self.assertIn("enabled=behavior_config.auto_start_session", node_source)
 
     def test_no_pending_adapter_exists_in_production_source(self) -> None:
         source = "\n".join(

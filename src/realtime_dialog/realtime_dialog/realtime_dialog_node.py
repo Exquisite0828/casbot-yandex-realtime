@@ -18,7 +18,7 @@ from .adapters import (
     RobotFlushEvent,
     publish_pcm_audio_packet,
 )
-from .dialog_controller import DialogController
+from .dialog_controller import ControllerResult, DialogController
 from .ros_contract import (
     AUDIO_DIALOG_FLUSH,
     AUDIO_DIALOG_PLAY,
@@ -45,6 +45,7 @@ from .yandex_realtime_client import (
     PRIMARY_MODEL,
     RuntimeConfig,
     YandexRealtimeClient,
+    redact_text,
 )
 
 
@@ -113,6 +114,82 @@ class BackgroundCommandBridge:
         return self._worker.submit(self._controller.handle_text_input(text))
 
 
+class InitialSessionAutoStarter:
+    """Submit one non-blocking start command during node initialization only."""
+
+    def __init__(
+        self,
+        *,
+        enabled: bool,
+        submit: Callable[[], Future[Any]],
+        watch: Callable[[Future[Any], str], object],
+    ) -> None:
+        self._enabled = enabled
+        self._submit = submit
+        self._watch = watch
+        self._scheduled = False
+
+    def schedule_once(self) -> Future[Any] | None:
+        if not self._enabled or self._scheduled:
+            return None
+        self._scheduled = True
+        future = self._submit()
+        self._watch(future, "auto-start")
+        return future
+
+
+class FailureJournalReporter:
+    """Sanitize one diagnostic before it reaches the ROS journal queue."""
+
+    def __init__(
+        self,
+        sink: Callable[[str], object],
+        *,
+        secrets: tuple[str, ...] = (),
+    ) -> None:
+        self._sink = sink
+        self._secrets = secrets
+
+    def report(self, prefix: str, reason: str) -> None:
+        safe_reason = redact_text(str(reason), secrets=self._secrets)
+        self._sink(f"{prefix}: {safe_reason}")
+
+
+def observe_command_completion(
+    future: Future[Any],
+    *,
+    command: str,
+    last_error: str | None,
+    failure_sink: Callable[[str, str], object],
+    status_sink: Callable[[str], object],
+) -> None:
+    """Classify an async command result without logging benign input rejection."""
+    try:
+        result = future.result()
+    except Exception as error:
+        reason = str(error) or type(error).__name__
+        failure_sink(
+            "dialog command exception",
+            f"{command} {type(error).__name__}: {reason}",
+        )
+        status_sink(STATUS_ERROR)
+        return
+    if not isinstance(result, ControllerResult) or result.success:
+        return
+    if last_error is not None and (
+        last_error == result.message or last_error.startswith(f"{result.message};")
+    ):
+        return
+    prefixes = {
+        "auto-start": "auto-start session failed",
+        "start": "start session failed",
+        "stop": "stop session failed",
+    }
+    prefix = prefixes.get(command)
+    if prefix is not None:
+        failure_sink(prefix, result.message)
+
+
 @dataclass(frozen=True, slots=True)
 class RobotAdapterConfig:
     mic_backend: str
@@ -133,6 +210,7 @@ class RobotAdapterConfig:
 class DialogBehaviorConfig:
     barge_in_enabled: bool
     microphone_resume_guard_ms: int
+    auto_start_session: bool
 
 
 def validate_robot_adapter_config(
@@ -231,6 +309,10 @@ if ROS2_AVAILABLE:
             runtime_config = self._runtime_config()
             adapter_config = self._adapter_config()
             behavior_config = self._behavior_config()
+            self._failure_reporter = FailureJournalReporter(
+                lambda value: self._outbound.put(("failure", value)),
+                secrets=(runtime_config.api_key,),
+            )
             validate_robot_adapter_config(
                 adapter_config,
                 yandex_input_sample_rate=runtime_config.input_sample_rate,
@@ -278,12 +360,20 @@ if ROS2_AVAILABLE:
                 audio_output=self._audio_output,
                 status_sink=self._enqueue_status,
                 text_result_sink=lambda value: self._outbound.put(("text", value)),
+                failure_sink=lambda reason: self._failure_reporter.report(
+                    "dialog session failure", reason
+                ),
                 microphone_queue_chunks=adapter_config.mic_queue_chunks,
                 barge_in_enabled=behavior_config.barge_in_enabled,
                 microphone_resume_guard_ms=behavior_config.microphone_resume_guard_ms,
             )
             self._commands = BackgroundCommandBridge(
                 self._worker, self._controller
+            )
+            self._auto_starter = InitialSessionAutoStarter(
+                enabled=behavior_config.auto_start_session,
+                submit=self._commands.start_session,
+                watch=self._watch,
             )
 
             self.create_service(
@@ -297,6 +387,14 @@ if ROS2_AVAILABLE:
             )
             self.create_timer(0.02, self._drain_outbound)
             self._enqueue_status(STATUS_IDLE)
+            try:
+                self._auto_starter.schedule_once()
+            except RuntimeError as error:
+                self._failure_reporter.report(
+                    "auto-start session failed",
+                    str(error) or type(error).__name__,
+                )
+                self._enqueue_status(STATUS_ERROR)
 
         def _runtime_config(self) -> RuntimeConfig:
             self.declare_parameter(
@@ -395,12 +493,16 @@ if ROS2_AVAILABLE:
         def _behavior_config(self) -> DialogBehaviorConfig:
             self.declare_parameter("barge_in_enabled", False)
             self.declare_parameter("microphone_resume_guard_ms", 500)
+            self.declare_parameter("auto_start_session", False)
             return DialogBehaviorConfig(
                 barge_in_enabled=bool(
                     self.get_parameter("barge_in_enabled").value
                 ),
                 microphone_resume_guard_ms=int(
                     self.get_parameter("microphone_resume_guard_ms").value
+                ),
+                auto_start_session=bool(
+                    self.get_parameter("auto_start_session").value
                 ),
             )
 
@@ -416,19 +518,28 @@ if ROS2_AVAILABLE:
             response.message = message
             return response
 
-        def _watch(self, future: Future[Any]) -> None:
-            future.add_done_callback(self._on_command_done)
+        def _watch(self, future: Future[Any], command: str) -> None:
+            future.add_done_callback(
+                lambda completed: self._on_command_done(completed, command)
+            )
 
-        def _on_command_done(self, future: Future[Any]) -> None:
-            try:
-                future.result()
-            except Exception:
-                self._enqueue_status(STATUS_ERROR)
+        def _on_command_done(self, future: Future[Any], command: str) -> None:
+            observe_command_completion(
+                future,
+                command=command,
+                last_error=self._controller.last_error,
+                failure_sink=self._failure_reporter.report,
+                status_sink=self._enqueue_status,
+            )
 
         def _on_start_session(self, _request: Any, response: Any) -> Any:
             try:
-                self._watch(self._commands.start_session())
-            except RuntimeError:
+                self._watch(self._commands.start_session(), "start")
+            except RuntimeError as error:
+                self._failure_reporter.report(
+                    "dialog command exception",
+                    f"start {type(error).__name__}: {error}",
+                )
                 response.success = False
                 response.message = "background worker unavailable"
                 return response
@@ -436,8 +547,12 @@ if ROS2_AVAILABLE:
 
         def _on_stop_session(self, _request: Any, response: Any) -> Any:
             try:
-                self._watch(self._commands.stop_session())
-            except RuntimeError:
+                self._watch(self._commands.stop_session(), "stop")
+            except RuntimeError as error:
+                self._failure_reporter.report(
+                    "dialog command exception",
+                    f"stop {type(error).__name__}: {error}",
+                )
                 response.success = False
                 response.message = "background worker unavailable"
                 return response
@@ -445,8 +560,14 @@ if ROS2_AVAILABLE:
 
         def _on_text_input(self, message: Any) -> None:
             try:
-                self._watch(self._commands.text_input(str(message.data)))
-            except RuntimeError:
+                self._watch(
+                    self._commands.text_input(str(message.data)), "text-input"
+                )
+            except RuntimeError as error:
+                self._failure_reporter.report(
+                    "dialog command exception",
+                    f"text-input {type(error).__name__}: {error}",
+                )
                 self._enqueue_status(STATUS_ERROR)
 
         def _drain_outbound(self) -> None:
@@ -461,6 +582,8 @@ if ROS2_AVAILABLE:
                     self._text_publisher.publish(String(data=str(value)))
                 elif kind == "session_active":
                     self._session_active_publisher.publish(Bool(data=bool(value)))
+                elif kind == "failure":
+                    self.get_logger().error(str(value))
 
             drain_robot_audio_output(
                 self._audio_output,

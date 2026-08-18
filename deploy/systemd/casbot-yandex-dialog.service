@@ -10,11 +10,11 @@ ConditionPathExists=/etc/casbot-yandex-realtime/external-dialog.enabled
 Type=simple
 User=root
 EnvironmentFile=/etc/casbot-yandex-realtime/yandex.env
-ExecStartPre=/opt/casbot-yandex-realtime/deploy/bin/casbot-yandex-preflight --mode service
+ExecStartPre=/opt/casbot-yandex-realtime/deploy/bin/casbot-yandex-preflight --mode service --wait --timeout 60 --probe-timeout 5 --poll-interval 0.5
 ExecStart=/opt/casbot-yandex-realtime/deploy/bin/casbot-yandex-launch
 KillSignal=SIGINT
 KillMode=control-group
-TimeoutStartSec=45s
+TimeoutStartSec=75s
 TimeoutStopSec=10s
 Restart=no
 

@@ -16,7 +16,12 @@ from .metadata_probe import (
     format_metadata,
     probe_first_metadata,
 )
-from .operations import RollbackController, SwitchController
+from .operations import (
+    ReadinessWaiter,
+    RollbackController,
+    SwitchController,
+    resolve_probe_timeout,
+)
 from .paths import DeploymentPaths
 from .vendor_gate import DeploymentError, VendorGate, VendorGateStatus
 
@@ -68,12 +73,29 @@ def preflight_main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--root", default="/")
     parser.add_argument("--json", action="store_true")
+    parser.add_argument("--wait", action="store_true")
     parser.add_argument("--timeout", type=float, default=5.0)
+    parser.add_argument("--probe-timeout", type=float)
+    parser.add_argument("--poll-interval", type=float, default=0.5)
     arguments = parser.parse_args(argv)
     try:
-        report = DeploymentInspector(
-            _paths(arguments.root), timeout=arguments.timeout
-        ).run(arguments.mode)
+        paths = _paths(arguments.root)
+        if arguments.wait:
+            if arguments.mode != "service":
+                raise ValueError("--wait is supported only for --mode service")
+            probe_timeout = resolve_probe_timeout(
+                arguments.timeout, arguments.probe_timeout
+            )
+            inspector = DeploymentInspector(paths, timeout=probe_timeout)
+            report = ReadinessWaiter(
+                timeout=arguments.timeout,
+                probe_timeout=probe_timeout,
+                poll_interval=arguments.poll_interval,
+            ).wait_for_report("service", inspector.run)
+        else:
+            report = DeploymentInspector(
+                paths, timeout=arguments.timeout
+            ).run(arguments.mode)
     except Exception as error:
         return _print_error(error)
     print(report.render_json() if arguments.json else report.render_text())
