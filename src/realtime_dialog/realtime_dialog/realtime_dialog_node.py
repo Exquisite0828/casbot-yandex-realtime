@@ -129,6 +129,12 @@ class RobotAdapterConfig:
     speaker_queue_packets: int
 
 
+@dataclass(frozen=True, slots=True)
+class DialogBehaviorConfig:
+    barge_in_enabled: bool
+    microphone_resume_guard_ms: int
+
+
 def validate_robot_adapter_config(
     config: RobotAdapterConfig,
     *,
@@ -224,6 +230,7 @@ if ROS2_AVAILABLE:
             self._outbound: SimpleQueue[tuple[str, object]] = SimpleQueue()
             runtime_config = self._runtime_config()
             adapter_config = self._adapter_config()
+            behavior_config = self._behavior_config()
             validate_robot_adapter_config(
                 adapter_config,
                 yandex_input_sample_rate=runtime_config.input_sample_rate,
@@ -272,6 +279,8 @@ if ROS2_AVAILABLE:
                 status_sink=self._enqueue_status,
                 text_result_sink=lambda value: self._outbound.put(("text", value)),
                 microphone_queue_chunks=adapter_config.mic_queue_chunks,
+                barge_in_enabled=behavior_config.barge_in_enabled,
+                microphone_resume_guard_ms=behavior_config.microphone_resume_guard_ms,
             )
             self._commands = BackgroundCommandBridge(
                 self._worker, self._controller
@@ -380,6 +389,18 @@ if ROS2_AVAILABLE:
                 ),
                 speaker_queue_packets=int(
                     self.get_parameter("speaker_queue_packets").value
+                ),
+            )
+
+        def _behavior_config(self) -> DialogBehaviorConfig:
+            self.declare_parameter("barge_in_enabled", False)
+            self.declare_parameter("microphone_resume_guard_ms", 500)
+            return DialogBehaviorConfig(
+                barge_in_enabled=bool(
+                    self.get_parameter("barge_in_enabled").value
+                ),
+                microphone_resume_guard_ms=int(
+                    self.get_parameter("microphone_resume_guard_ms").value
                 ),
             )
 

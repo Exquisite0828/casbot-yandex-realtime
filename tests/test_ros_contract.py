@@ -143,7 +143,24 @@ class RosContractTest(unittest.TestCase):
         self.assertIn('default_value="dialog_node"', launch_text)
         self.assertIn("speaker_pcm_format: \"\"", config_text)
         self.assertIn("mic_device: \"hw:0,0\"", config_text)
+        self.assertIn("barge_in_enabled: false", config_text)
+        self.assertIn("microphone_resume_guard_ms: 500", config_text)
         self.assertNotIn("YANDEX_API_KEY", config_text)
+
+    def test_ros_half_duplex_parameters_are_declared_and_propagated(self) -> None:
+        node_source = (
+            PACKAGE_ROOT / "realtime_dialog" / "realtime_dialog_node.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn('declare_parameter("barge_in_enabled", False)', node_source)
+        self.assertIn(
+            'declare_parameter("microphone_resume_guard_ms", 500)',
+            node_source,
+        )
+        self.assertIn("barge_in_enabled=behavior_config.barge_in_enabled", node_source)
+        self.assertIn(
+            "microphone_resume_guard_ms=behavior_config.microphone_resume_guard_ms",
+            node_source,
+        )
 
     def test_no_pending_adapter_exists_in_production_source(self) -> None:
         source = "\n".join(

@@ -51,9 +51,14 @@ class DialogController:
         status_sink: Callable[[str], object],
         text_result_sink: Callable[[str], object],
         microphone_queue_chunks: int = 50,
+        barge_in_enabled: bool = True,
+        microphone_resume_guard_ms: int = 500,
+        monotonic_time: Callable[[], float] | None = None,
     ) -> None:
         if microphone_queue_chunks <= 0:
             raise ValueError("microphone_queue_chunks must be greater than zero")
+        if microphone_resume_guard_ms < 0:
+            raise ValueError("microphone_resume_guard_ms must be non-negative")
         self._client = client
         self._mic = mic_adapter
         self._audio_output = audio_output
@@ -70,6 +75,10 @@ class DialogController:
         )
         self._microphone_sender_task: asyncio.Task[None] | None = None
         self._microphone_dropped_chunks = 0
+        self._barge_in_enabled = barge_in_enabled
+        self._microphone_resume_guard_seconds = microphone_resume_guard_ms / 1000
+        self._monotonic_time = monotonic_time
+        self._microphone_resume_at = 0.0
         self._accept_events = False
         self._lifecycle_lock = asyncio.Lock()
         self._failure_task: asyncio.Task[None] | None = None
@@ -113,6 +122,21 @@ class DialogController:
                 self._microphone_queue.get_nowait()
             except asyncio.QueueEmpty:
                 return
+
+    def _now(self) -> float:
+        if self._monotonic_time is not None:
+            return self._monotonic_time()
+        loop = self._loop
+        if loop is not None:
+            return loop.time()
+        return asyncio.get_running_loop().time()
+
+    def _microphone_uplink_is_suppressed(self) -> bool:
+        if self._barge_in_enabled:
+            return False
+        if self._state == STATUS_SPEAKING_TEXT:
+            return True
+        return self._now() < self._microphone_resume_at
 
     def _advance_generation(self) -> int:
         self._generation_id += 1
@@ -163,6 +187,7 @@ class DialogController:
             return ControllerResult(True, "session already active")
 
         self._loop = asyncio.get_running_loop()
+        self._microphone_resume_at = 0.0
         generation = self._advance_generation()
         self._accept_events = True
         self._last_error = None
@@ -257,6 +282,7 @@ class DialogController:
             or generation != self._generation_id
             or not self._accept_events
             or self._state in {STATUS_IDLE, STATUS_ERROR}
+            or self._microphone_uplink_is_suppressed()
         ):
             return
         try:
@@ -276,6 +302,7 @@ class DialogController:
                 generation != self._generation_id
                 or not self._microphone_started
                 or not self._accept_events
+                or self._microphone_uplink_is_suppressed()
             ):
                 continue
             try:
@@ -390,6 +417,8 @@ class DialogController:
             self._set_state(STATUS_LISTENING)
         elif event.kind is RealtimeEventKind.RESPONSE_STARTED:
             self._set_state(STATUS_SPEAKING_TEXT)
+            if not self._barge_in_enabled:
+                self._clear_microphone_queue()
         elif event.kind is RealtimeEventKind.ASSISTANT_TEXT:
             text = str(event.data.get("text", ""))
             if text:
@@ -407,6 +436,10 @@ class DialogController:
                     event.generation_id,
                 )
         elif event.kind is RealtimeEventKind.RESPONSE_DONE:
+            if not self._barge_in_enabled:
+                self._microphone_resume_at = (
+                    self._now() + self._microphone_resume_guard_seconds
+                )
             self._set_state(STATUS_LISTENING)
         elif event.kind is RealtimeEventKind.SPEECH_STARTED:
             await self._handle_speech_started(event)
@@ -421,6 +454,8 @@ class DialogController:
 
     async def _handle_speech_started(self, event: RealtimeEvent) -> None:
         async with self._lifecycle_lock:
+            if not self._barge_in_enabled:
+                return
             if (
                 not self._accept_events
                 or event.generation_id != self._generation_id

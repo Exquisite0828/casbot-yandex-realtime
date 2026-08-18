@@ -1,7 +1,7 @@
 # CASBOT → Yandex Realtime 迁移实施计划
 
 > 版本：v1.0  
-> 状态：Phase 7 COMPLETE；Gate 7 CONDITIONAL PASS；Phase 8 IN PROGRESS；Phase 8F FIRST SWITCH ATTEMPT FAILED / VENDOR MODE RESTORED；本地 readiness repair 完成，机器人重同步与第二次 switch 待执行
+> 状态：Phase 7 COMPLETE；Gate 7 CONDITIONAL PASS；Phase 8 IN PROGRESS；后续实机 Yandex 俄语对话成功并观察到连续自言自语；Phase 8H half-duplex mitigation 本地完成、实机验证待执行
 > 目标平台：Linux / ROS2 Humble / Python 3.10  
 > 核心原则：本地开发优先、最少 SSH、保持机器人外部 ROS2 契约不变、可快速回滚。
 
@@ -472,8 +472,9 @@ fail-closed guard、fake-root/fake-runner 测试和安全边界已完成复审�
 
 **当前状态：IN PROGRESS。Phase 8C COMPLETE；Phase 8D CONFIG/CREDENTIAL
 PREPARATION COMPLETE；Phase 8E SYSTEMD UNIT INSTALLED、DISABLED/INACTIVE；
-Phase 8F FIRST SWITCH ATTEMPT FAILED、VENDOR MODE RESTORED。本地 readiness repair
-完成，机器人重同步和第二次 switch 待执行。**
+Phase 8F FIRST SWITCH ATTEMPT FAILED、VENDOR MODE RESTORED；后续用户提供的实机
+证据确认 Yandex 模式和真人俄语对话曾成功，并随后观察到连续自言自语。Phase 8H
+half-duplex mitigation 已在仓库本地完成，实机配置、同步和验证待执行。**
 
 本轮任务提供的实机记录证明 Phase 8C 已完成固定源码上传、独立 venv、aiohttp
 隔离、ROS2 build 和安装产物验证。机器人缺少 ensurepip 且 apt 无可用 Candidate，
@@ -495,8 +496,16 @@ PASS，机器人安全恢复厂家模式。旧版本未保留 transition 失败�
 反第三方机制没有被证明存在或不存在。
 
 Phase 8F 本地修复已统一 bounded readiness polling、deadline/probe timeout、连续稳定
-PASS、transient/hard 分类、last report 和 final-state-aware 恢复指引。该修复尚未
-同步机器人，第二次 switch 尚未执行。
+PASS、transient/hard 分类、last report 和 final-state-aware 恢复指引。该修复完成
+时尚未同步机器人，第二次 switch 尚未执行。
+
+后续用户提供的现场事实确认机器人曾成功建立 Yandex 模式，真人俄语理解和回复
+正常且主观响应很快；随后观察到机器人连续自己说话。speaker 输出被持续运行的
+本机 microphone 回采并重新上传是当前主要推断，尚未实机严格证明。Phase 8H 在
+controller 入队端和 sender 发送前增加 half-duplex microphone suppression，并在
+`RESPONSE_DONE` 后采用 500 ms monotonic guard；500 ms 是项目调优策略，不是厂家或
+Yandex 事实。该 mitigation 尚未同步或实机复验，不得记为 `FIELD PASS`，也不证明
+物理 AEC 根因。`STATUS_IDLE`/session 自动结束问题不属于本轮范围。
 
 部署：
 
@@ -510,9 +519,9 @@ PASS、transient/hard 分类、last report 和 final-state-aware 恢复指引。
 - [x] 真实机器人到 Yandex WebSocket/session 探测。
 - [ ] 同步 Phase 8F readiness repair 后完整部署资产并重新运行 preflight。
 - [ ] 第二次 switch 的 transition readiness PASS。
-- [ ] 启 Yandex 服务。
+- [x] 后续实机曾成功建立 Yandex 模式并运行 Yandex 服务（用户提供现场事实）。
 - [ ] ROS graph 检查。
-- [ ] 真人语音测试。
+- [x] 真人俄语理解与回复曾成功；随后连续自言自语，完整验收仍未完成。
 - [ ] 日志检查。
 - [ ] 确认千问不再新增请求。
 - [ ] 检查 Yandex usage。
@@ -617,21 +626,22 @@ Phase 8C: COMPLETE
 Phase 8D: CONFIG/CREDENTIAL PREPARATION COMPLETE
 Phase 8E: SYSTEMD UNIT INSTALLED; DISABLED/INACTIVE
 Phase 8F: FIRST SWITCH ATTEMPT FAILED; VENDOR MODE RESTORED
-Phase 8F repository repair: COMPLETE LOCALLY; ROBOT RESYNC/SECOND SWITCH PENDING
-Robot Yandex session probe: PASS; replacement ROS2 node takeover NOT PROVEN
-Formal switch: NOT COMPLETE
+Phase 8F repository repair: COMPLETE LOCALLY; LATER YANDEX MODE OBSERVED
+Phase 8H half-duplex mitigation: COMPLETE LOCALLY; FIELD VALIDATION PENDING
+Robot Yandex voice conversation: PASS ONCE; CONTINUOUS SELF-SPEECH OBSERVED LATER
+Formal switch: YANDEX MODE ESTABLISHED ONCE; ACCEPTANCE NOT COMPLETE
 Formal rollback: NOT STARTED
 Remote robot changes in this repair: NONE
 Remote SSH required now: NO
 Vendor source available: NO
 Yandex production protocol verified: LOCAL ROUTE A CORE PATH VERIFIED WITH speech-realtime-260528
 Local Yandex PoC: COMPLETE
-ROS2 compatibility node: ROBOT BUILD/INSTALL VERIFIED; YANDEX RUNTIME NOT STARTED
+ROS2 compatibility node: ROBOT BUILD/INSTALL VERIFIED; YANDEX VOICE PATH OBSERVED
 Robot runtime snapshot: PHASE 4 EVIDENCE FROZEN; PHASE 8 FIELD EVIDENCE RECORDED
 Robot adaptation: PHASE 5 COMPLETE; LOCAL ADAPTER IMPLEMENTATION COMPLETE
 Systematic testing: PHASE 6 COMPLETE; GATE 6 PASS
 Deployment design: PHASE 7 COMPLETE; LOCAL CONTROL PLANE IMPLEMENTED
-Robot deployment: PHASE 8F FIRST SWITCH FAILED; VENDOR MODE RESTORED
+Robot deployment: YANDEX MODE ESTABLISHED ONCE; PHASE 8H FIELD VALIDATION PENDING
 ```
 
 ### 当前阶段边界
@@ -646,9 +656,10 @@ Phase 8C — COMPLETE
 Phase 8D — CONFIG/CREDENTIAL PREPARATION COMPLETE
 Phase 8E — SYSTEMD UNIT INSTALLED; DISABLED/INACTIVE
 Phase 8F — FIRST SWITCH ATTEMPT FAILED; VENDOR MODE RESTORED
-Phase 8F repository repair — COMPLETE LOCALLY; ROBOT RESYNC/SECOND SWITCH PENDING
-Robot Yandex session probe — PASS; replacement ROS2 node takeover NOT PROVEN
-Formal switch — NOT COMPLETE
+Phase 8F repository repair — COMPLETE LOCALLY; LATER YANDEX MODE OBSERVED
+Phase 8H half-duplex mitigation — COMPLETE LOCALLY; FIELD VALIDATION PENDING
+Robot Yandex voice conversation — PASS ONCE; CONTINUOUS SELF-SPEECH OBSERVED LATER
+Formal switch — YANDEX MODE ESTABLISHED ONCE; ACCEPTANCE NOT COMPLETE
 Formal rollback — NOT STARTED
 ```
 
@@ -656,8 +667,9 @@ Phase 6 本地系统测试与 Gate 修复已完成并通过复审，Gate 6 正�
 `PASS`。Phase 7 本地部署设计和控制工具已经完成复审，Gate 7 为
 `CONDITIONAL PASS`。Phase 8C–8E 已完成 build/preflight、配置/凭据准备和
 disabled/inactive unit 安装。Phase 8F 第一次 switch 在 transition 阶段失败并最终恢复
-厂家模式；本地 readiness repair 尚待同步机器人，第二次 switch 尚未执行。替换 ROS2
-节点接管、正式正常 rollback 和 Gate 8 均未完成或判定，不得自动继续实机操作。
+厂家模式；后续用户提供的实机证据确认 Yandex 模式和真人俄语对话曾成功，之后发生
+连续自言自语观察。Phase 8H half-duplex mitigation 仅在仓库本地完成，尚未同步、
+配置或实机验证。正式正常 rollback 和 Gate 8 均未完成或判定，不得自动继续实机操作。
 
 ## 11. Decision Log
 
@@ -697,3 +709,4 @@ disabled/inactive unit 安装。Phase 8F 第一次 switch 在 transition 阶段�
 - **D-034**：Phase 7 最终决策为独立 Yandex service 配合 vendor marker gate；正式切换和 Yandex 启动必须通过 `jijia` + 已知厂家 backend 的 fail-closed guard。若切换过程中配置漂移，则停止 Yandex、保留 marker，且不自动恢复未知模式。Phase 7 为 `COMPLETE`，Gate 7 为 `CONDITIONAL PASS`；`PcmAudioFrame.format`、厂家实际发布 rate/channels、speaker 输入兼容性、`hw:0,0` 实际采集、speaker/嘴型/flush、`session_active` 精确时序、真实 Yandex 网络和凭据、正式 switch/rollback 均保留为 Phase 8 实机验证项，不得视为已验证。Phase 7 收口时 Phase 8 尚未开始。
 - **D-035**：Phase 8 已进入 `IN PROGRESS`。用户提供的 Phase 8C 实机记录证明固定基线源码、独立 venv、aiohttp purelib 隔离、ROS2 build/install 已完成；厂家 output metadata 为 `24000 / 1 / pcm_s16le` 且 speaker 实际出声，嘴型未确认。ensurepip 缺失时采用 `--without-pip --system-site-packages` 加 `pip --target <venv purelib>`，并验证系统 Python 无 aiohttp。build preflight 暴露 strict wrapper 与外部 ROS/ament setup 的 nounset 兼容问题；决策是在 `deploy/lib/casbot-runtime-env` 统一 helper 中仅围绕当前-shell source 临时关闭 nounset、保留环境副作用、传播错误并恢复原 option，所有共享控制入口和独立 launch 均复用该抽象，不硬编码 AMENT 变量。仓库 repair 已通过本地测试；机器人新版本同步和 build preflight 复验仍 pending。厂家 launch、marker、service、dialog 未切换或修改，Robot Yandex runtime、真实凭据/连接、正式 switch/rollback、Gate 8 均未开始；不进入 Phase 8D。
 - **D-036**：Phase 8C build preflight、Phase 8D 配置/凭据准备和 Phase 8E disabled/inactive unit 安装已完成；vendor gate 为 `PATCHED`，恢复后 marker absent，真实机器人到 Yandex WebSocket/session 探测 PASS，但不构成替换 ROS2 节点接管证据。第一次 Phase 8F switch 在 Yandex service start 前的 transition verify 失败且 journal 无 Yandex entries；旧 automatic rollback 的立即 vendor-mode verify 失败，稍后完整 vendor-mode verify PASS，确认当时已安全恢复厂家模式。旧版本未保存具体 transition failure，因此该项保持 UNKNOWN；readiness/settling race 只是最强推断，厂家 watchdog/反第三方机制未被证明存在或不存在。控制面决策为所有 transition/service/Yandex/vendor readiness 采用统一 monotonic deadline、独立小 probe timeout、显式 transient/hard policy 和连续稳定 PASS；失败保留 last `CheckReport`，rollback 未证明时按最终 marker/service/process snapshot 提示。该 repair 仅在本地完成，尚未同步机器人，第二次 switch、替换节点验收、真实正常 rollback 与 Gate 8 均未完成。
+- **D-037**：后续用户提供的实机事实确认机器人曾建立 Yandex 模式并完成真人俄语对话，理解和回复正常且主观响应很快；随后现场观察到机器人连续自己说话。speaker 声音被持续采集的本机 microphone 回采并触发新 Yandex turn 是当前最强推断，不是 VERIFIED 根因，仓库也没有 AEC。Phase 8H 采用可配置 half-duplex：generic controller 默认保留 speech barge-in，ROS robot/profile 明确关闭；assistant 输出期间入队端与 sender 发送前均抑制 microphone uplink 但不停止 arecord，忽略 speech-based interruption，保留显式 text replacement/cancel，并在 response done 后使用 500 ms monotonic resume guard。500 ms 是 project tuning policy。该 mitigation 仅本地实现和测试，真实 `/etc` 配置未修改、机器人未同步或复验，不得记为 FIELD PASS；后续通过也只证明 mitigation 有效，不证明物理 AEC 根因。`STATUS_IDLE` 自动结束问题明确保持 OUT OF SCOPE。

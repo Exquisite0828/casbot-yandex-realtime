@@ -1,12 +1,13 @@
 # Phase 8 Field Deployment Record
 
-> Updated: 2026-08-17
+> Updated: 2026-08-18
 > Phase 8 — IN PROGRESS
 > Phase 8C — COMPLETE
 > Phase 8D — CONFIG/CREDENTIAL PREPARATION COMPLETE
 > Phase 8E — SYSTEMD UNIT INSTALLED; DISABLED/INACTIVE
 > Phase 8F — FIRST SWITCH ATTEMPT FAILED; VENDOR MODE RESTORED
-> Phase 8F repository repair — COMPLETE LOCALLY; ROBOT RESYNC AND SECOND SWITCH PENDING
+> Phase 8F repository repair — COMPLETE LOCALLY; LATER YANDEX MODE OBSERVED
+> Phase 8H half-duplex mitigation — IMPLEMENTED LOCALLY; FIELD VALIDATION PENDING
 
 This document records the Phase 8 facts supplied from the maintenance-window
 field work separately from the historical Phase 4 and Phase 7 conclusions. No
@@ -95,8 +96,9 @@ guidance is derived from that snapshot: it no longer tells an operator to
 retain a marker that is actually absent, and it never claims vendor mode was
 restored without a passing verifier report.
 
-This repair is local repository evidence only. The new fixed source has not
-been synchronized to the robot, and a second switch has not been run.
+At the time of this repair, it was local repository evidence only: the fixed
+source had not been synchronized and a second switch had not been run. The
+later Yandex-mode field observation is recorded separately under Phase 8H.
 
 ## Phase 8F microphone CLI compatibility evidence
 
@@ -120,17 +122,71 @@ This is a project adapter CLI compatibility bug. It is not evidence of a
 manufacturer watchdog, anti-third-party behavior, or another vendor protection
 mechanism. This repository repair did not run the command or access the robot.
 
+## Phase 8H half-duplex self-echo protection
+
+### VERIFIED field observations
+
+User-provided field evidence confirms that the robot established Yandex mode
+and completed a real Russian voice conversation. It understood the human
+speaker and returned appropriate Russian replies; the observed response was
+subjectively fast, but no quantitative latency result is claimed.
+
+The later field observation was that the robot began speaking continuously,
+reported as `Она сама говорит без остановки`. This observation is verified;
+its physical cause is not.
+
+### INFERENCE
+
+The leading hypothesis is that robot speaker output was acoustically captured
+by the continuously running local microphone, uploaded to Yandex, and treated
+as new speech. The repository has no acoustic echo cancellation. This
+speaker-to-microphone feedback path is an inference, not a verified root cause;
+the evidence does not prove a physical AEC diagnosis.
+
+### IMPLEMENTED MITIGATION
+
+The local repository now provides a configurable half-duplex controller mode.
+The generic `DialogController` keeps speech barge-in enabled by default for
+compatibility, while the ROS robot default and both robot configuration
+templates explicitly set `barge_in_enabled: false`.
+
+With speech barge-in disabled, microphone capture remains active for the whole
+session, but `RESPONSE_STARTED` clears queued microphone PCM and suppresses new
+uplink audio. The sender rechecks suppression after dequeue and before calling
+the Yandex audio send boundary. `SPEECH_STARTED` during assistant output is
+ignored without generation advance, speaker flush, response cancel, or state
+change. Explicit `text_input` replacement/cancel behavior is unchanged.
+
+After `RESPONSE_DONE`, uplink remains suppressed for the configured
+`microphone_resume_guard_ms`; the robot policy is 500 ms. This value is a
+project tuning policy, not a manufacturer or Yandex verified fact. The guard
+uses event-loop monotonic time and does not stop or restart `arecord`.
+
+This mitigation is implemented and locally tested only. It is not a
+`FIELD PASS`: the repository was not synchronized to the robot in this work,
+the real `/etc/casbot-yandex-realtime/casbot-yandex.yaml` was not changed, and
+there has been no follow-up field test proving that continuous self-speech no
+longer occurs. Even a later successful field test would validate the mitigation
+without proving the acoustic-feedback hypothesis. The separate
+`STATUS_IDLE`/automatic-session-ending issue remains out of scope.
+
 ## Remaining Phase 8 conditions
 
 - synchronize one reviewed fixed commit and rerun preflight on the robot;
-- run the separately authorized second switch while preserving every readiness
-  report and final-state output;
-- prove the replacement ROS2 node start and complete human acceptance;
+- preserve and review the readiness reports and final-state output from the
+  later successful Yandex-mode establishment;
+- preserve and review replacement-node/ROS-graph evidence from the established
+  Yandex mode, and complete human acceptance including the self-speech retest;
 - retain `hw:0,0 / S16_LE / mono / 16000 Hz` capture as VERIFIED field evidence;
 - prove replacement-path speaker/mouth/flush behavior and exact `session_active`
   timing;
 - execute and verify a real normal rollback;
 - retain the first transition's exact historical failure as UNKNOWN;
-- retain vendor watchdog/anti-third-party behavior as NOT PROVEN.
+- retain vendor watchdog/anti-third-party behavior as NOT PROVEN;
+- deploy the reviewed Phase 8H source and robot configuration, then verify that
+  continuous self-speech no longer occurs before recording a mitigation
+  `FIELD PASS`;
+- retain speaker acoustic feedback as an inference even if the mitigation
+  passes in the field.
 
 Phase 8 and Gate 8 are not complete or decided by this repair.

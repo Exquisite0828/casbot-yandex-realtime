@@ -83,6 +83,8 @@ class DeploymentAssetsTest(unittest.TestCase):
         self.assertEqual(set(parameter.findall(deployment)), set(parameter.findall(existing)))
         self.assertIn('speaker_pcm_format: ""', deployment)
         self.assertIn('mic_device: "hw:0,0"', deployment)
+        self.assertIn("barge_in_enabled: false", deployment)
+        self.assertIn("microphone_resume_guard_ms: 500", deployment)
         self.assertIn("NOT a capture PASS", deployment)
         self.assertIn("Phase 8", deployment)
 

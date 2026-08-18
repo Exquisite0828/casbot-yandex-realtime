@@ -1,4 +1,5 @@
 import asyncio
+import inspect
 import unittest
 
 from realtime_dialog.dialog_controller import DialogController
@@ -26,6 +27,7 @@ class FakeClient:
         self.close_calls = 0
         self.send_gate: asyncio.Event | None = None
         self.send_started = asyncio.Event()
+        self.audio_sent = asyncio.Event()
         self.send_error: Exception | None = None
         self.cancel_error: Exception | None = None
         self.close_error: Exception | None = None
@@ -65,6 +67,7 @@ class FakeClient:
             self.send_error = None
             raise error
         self.sent_audio.append(pcm)
+        self.audio_sent.set()
 
     async def send_text(self, text: str) -> None:
         self.sent_text.append(text)
@@ -141,6 +144,32 @@ class FakeAudioOutputAdapter:
         return self.flush_count
 
 
+class FakeMonotonic:
+    def __init__(self, initial: float = 100.0) -> None:
+        self.value = initial
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance_ms(self, milliseconds: int) -> None:
+        self.value += milliseconds / 1000
+
+
+class PausedAfterDequeueQueue(asyncio.Queue[tuple[int, bytes]]):
+    """Pause after removing one item so sender state can change deterministically."""
+
+    def __init__(self, maxsize: int) -> None:
+        super().__init__(maxsize=maxsize)
+        self.item_dequeued = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def get(self) -> tuple[int, bytes]:
+        item = await super().get()
+        self.item_dequeued.set()
+        await self.release.wait()
+        return item
+
+
 class DialogControllerTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         self.order: list[str] = []
@@ -149,16 +178,31 @@ class DialogControllerTest(unittest.IsolatedAsyncioTestCase):
         self.audio = FakeAudioOutputAdapter(self.order)
         self.statuses: list[str] = []
         self.text_results: list[str] = []
-        self.controller = DialogController(
-            client=self.client,
-            mic_adapter=self.mic,
-            audio_output=self.audio,
-            status_sink=lambda value: (
+        self.controller = self._make_controller()
+
+    def _make_controller(self, **overrides) -> DialogController:
+        unsupported = set(overrides).difference(
+            inspect.signature(DialogController).parameters
+        )
+        self.assertEqual(
+            unsupported,
+            set(),
+            f"unsupported controller options: {unsupported}",
+        )
+        options = {
+            "client": self.client,
+            "mic_adapter": self.mic,
+            "audio_output": self.audio,
+            "status_sink": lambda value: (
                 self.statuses.append(value),
                 self.order.append(f"status:{value}"),
             ),
-            text_result_sink=self.text_results.append,
-            microphone_queue_chunks=2,
+            "text_result_sink": self.text_results.append,
+            "microphone_queue_chunks": 2,
+        }
+        options.update(overrides)
+        return DialogController(
+            **options,
         )
 
     async def asyncTearDown(self) -> None:
@@ -469,6 +513,7 @@ class DialogControllerTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(self.order.index("flush"), self.order.index("cancel"))
 
     async def test_speech_started_barge_in_flushes_before_cancel(self) -> None:
+        self.controller = self._make_controller(barge_in_enabled=True)
         await self.controller.start_session()
         generation = self.controller.generation_id
         await self.controller.handle_event(
@@ -481,6 +526,173 @@ class DialogControllerTest(unittest.IsolatedAsyncioTestCase):
         self.assertLess(self.order.index("flush"), self.order.index("cancel"))
         self.assertEqual(self.controller.generation_id, generation + 1)
         self.assertEqual(self.controller.state, STATUS_LISTENING)
+
+    async def test_half_duplex_listening_sends_microphone_audio(self) -> None:
+        self.controller = self._make_controller(barge_in_enabled=False)
+        await self.controller.start_session()
+
+        self.mic.emit(b"human speech")
+        await asyncio.wait_for(self.client.audio_sent.wait(), timeout=1)
+
+        self.assertEqual(self.client.sent_audio, [b"human speech"])
+
+    async def test_half_duplex_response_started_suppresses_new_microphone_audio(
+        self,
+    ) -> None:
+        self.controller = self._make_controller(barge_in_enabled=False)
+        await self.controller.start_session()
+        generation = self.controller.generation_id
+        await self.controller.handle_event(
+            RealtimeEvent(RealtimeEventKind.RESPONSE_STARTED, generation, {})
+        )
+
+        self.mic.emit(b"speaker echo")
+        await self._event_loop_checkpoint()
+        await self._event_loop_checkpoint()
+
+        self.assertEqual(self.client.sent_audio, [])
+        self.assertTrue(self.mic.started)
+
+    async def test_half_duplex_response_started_clears_queued_microphone_audio(
+        self,
+    ) -> None:
+        self.controller = self._make_controller(barge_in_enabled=False)
+        self.client.send_gate = asyncio.Event()
+        await self.controller.start_session()
+        generation = self.controller.generation_id
+        self.mic.emit(b"already in flight")
+        await asyncio.wait_for(self.client.send_started.wait(), timeout=1)
+        self.controller._offer_microphone_audio(b"queued one", generation)
+        self.controller._offer_microphone_audio(b"queued two", generation)
+        self.assertEqual(self.controller.microphone_queue_size, 2)
+
+        await self.controller.handle_event(
+            RealtimeEvent(RealtimeEventKind.RESPONSE_STARTED, generation, {})
+        )
+
+        self.assertEqual(self.controller.microphone_queue_size, 0)
+        self.client.send_gate.set()
+
+    async def test_half_duplex_sender_rechecks_suppression_after_dequeue(
+        self,
+    ) -> None:
+        self.controller = self._make_controller(barge_in_enabled=False)
+        queue = PausedAfterDequeueQueue(maxsize=2)
+        self.controller._microphone_queue = queue
+        await self.controller.start_session()
+        generation = self.controller.generation_id
+
+        self.mic.emit(b"dequeued before response")
+        await asyncio.wait_for(queue.item_dequeued.wait(), timeout=1)
+        await self.controller.handle_event(
+            RealtimeEvent(RealtimeEventKind.RESPONSE_STARTED, generation, {})
+        )
+        queue.release.set()
+        await self._event_loop_checkpoint()
+
+        self.assertEqual(self.client.sent_audio, [])
+
+    async def test_half_duplex_speech_started_does_not_interrupt_response(self) -> None:
+        self.controller = self._make_controller(barge_in_enabled=False)
+        await self.controller.start_session()
+        generation = self.controller.generation_id
+        await self.controller.handle_event(
+            RealtimeEvent(RealtimeEventKind.RESPONSE_STARTED, generation, {})
+        )
+        flush_count = self.audio.flush_count
+        cancel_calls = self.client.cancel_calls
+
+        await self.controller.handle_event(
+            RealtimeEvent(RealtimeEventKind.SPEECH_STARTED, generation, {})
+        )
+
+        self.assertEqual(self.controller.generation_id, generation)
+        self.assertEqual(self.audio.flush_count, flush_count)
+        self.assertEqual(self.client.cancel_calls, cancel_calls)
+        self.assertEqual(self.controller.state, STATUS_SPEAKING_TEXT)
+
+    async def test_half_duplex_response_done_guard_uses_fake_monotonic_time(
+        self,
+    ) -> None:
+        monotonic = FakeMonotonic()
+        self.controller = self._make_controller(
+            barge_in_enabled=False,
+            microphone_resume_guard_ms=500,
+            monotonic_time=monotonic,
+        )
+        await self.controller.start_session()
+        generation = self.controller.generation_id
+        await self.controller.handle_event(
+            RealtimeEvent(RealtimeEventKind.RESPONSE_STARTED, generation, {})
+        )
+        await self.controller.handle_event(
+            RealtimeEvent(RealtimeEventKind.RESPONSE_DONE, generation, {})
+        )
+
+        self.mic.emit(b"speaker tail")
+        await self._event_loop_checkpoint()
+        self.assertEqual(self.client.sent_audio, [])
+
+        monotonic.advance_ms(501)
+        self.mic.emit(b"human after guard")
+        await asyncio.wait_for(self.client.audio_sent.wait(), timeout=1)
+        self.assertEqual(self.client.sent_audio, [b"human after guard"])
+
+    async def test_half_duplex_text_replacement_still_flushes_and_cancels(self) -> None:
+        self.controller = self._make_controller(barge_in_enabled=False)
+        await self.controller.start_session()
+        generation = self.controller.generation_id
+        await self.controller.handle_event(
+            RealtimeEvent(RealtimeEventKind.RESPONSE_STARTED, generation, {})
+        )
+        self.order.clear()
+
+        result = await self.controller.handle_text_input("Новый вопрос")
+
+        self.assertTrue(result.success)
+        self.assertLess(self.order.index("flush"), self.order.index("cancel"))
+
+    async def test_half_duplex_stop_during_response_still_cleans_resources(self) -> None:
+        self.controller = self._make_controller(barge_in_enabled=False)
+        await self.controller.start_session()
+        generation = self.controller.generation_id
+        await self.controller.handle_event(
+            RealtimeEvent(RealtimeEventKind.RESPONSE_STARTED, generation, {})
+        )
+
+        result = await self.controller.stop_session()
+
+        self.assertTrue(result.success)
+        self.assertEqual(self.controller.state, STATUS_IDLE)
+        self.assertFalse(self.mic.started)
+        self.assertIsNone(self.controller.microphone_sender_task)
+        self.assertEqual(self.controller.microphone_queue_size, 0)
+
+    async def test_half_duplex_fatal_cleanup_still_releases_resources(self) -> None:
+        self.controller = self._make_controller(barge_in_enabled=False)
+        await self.controller.start_session()
+        generation = self.controller.generation_id
+        await self.controller.handle_event(
+            RealtimeEvent(RealtimeEventKind.RESPONSE_STARTED, generation, {})
+        )
+
+        await self.controller.handle_event(
+            RealtimeEvent(
+                RealtimeEventKind.ERROR,
+                generation,
+                {"message": "scripted failure"},
+            )
+        )
+        await self.controller._await_failure_cleanup()
+
+        self.assertEqual(self.controller.state, STATUS_ERROR)
+        self.assertFalse(self.mic.started)
+        self.assertIsNone(self.controller.microphone_sender_task)
+        self.assertEqual(self.controller.microphone_queue_size, 0)
+
+    def test_negative_microphone_resume_guard_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "microphone_resume_guard_ms"):
+            self._make_controller(microphone_resume_guard_ms=-1)
 
     async def test_speech_started_lifecycle_is_serialized_before_stop(self) -> None:
         await self.controller.start_session()
